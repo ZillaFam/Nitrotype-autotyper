@@ -1,0 +1,142 @@
+:root {
+  /* Monkeytype's default "serika dark" palette */
+  --bg: #323437;
+  --panel: #2c2e31;
+  --main: #e2b714;
+  --text: #d1d0c5;
+  --sub: #646669;
+  --error: #ca4754;
+  --ok: #4ade80;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 320px;
+  margin: 0;
+  padding: 14px 16px 16px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+h1 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--main);
+}
+
+.status {
+  margin: 4px 0 12px;
+  color: var(--sub);
+}
+
+.status.running {
+  color: var(--ok);
+}
+
+.status.error {
+  color: var(--error);
+}
+
+.field {
+  margin-bottom: 12px;
+}
+
+.field > label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--sub);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+input[type="range"] {
+  flex: 1;
+  accent-color: var(--main);
+}
+
+input[type="number"] {
+  width: 58px;
+  padding: 3px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  text-align: right;
+}
+
+input[type="number"]:focus {
+  outline: none;
+  border-color: var(--main);
+}
+
+.unit {
+  width: 28px;
+  color: var(--sub);
+}
+
+.hint {
+  margin: 4px 0 0;
+  color: var(--sub);
+  font-size: 11px;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 14px;
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--main);
+}
+
+button.primary {
+  width: 100%;
+  padding: 9px;
+  border: none;
+  border-radius: 6px;
+  background: var(--main);
+  color: var(--bg);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button.primary.stop {
+  background: var(--error);
+  color: #fff;
+}
+
+button.primary:disabled {
+  background: var(--sub);
+  cursor: default;
+}
+
+.shortcut {
+  margin-top: 10px;
+  text-align: center;
+}
+
+kbd {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+a {
+  color: var(--main);
+}

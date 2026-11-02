@@ -1,0 +1,13 @@
+{
+  "name": "monkeytype-autotyper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome extension that autotypes Monkeytype tests at a set WPM and accuracy.",
+  "type": "module",
+  "scripts": {
+    "test": "node test/e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.50.0"
+  }
+}

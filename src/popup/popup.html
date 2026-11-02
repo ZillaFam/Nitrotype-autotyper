@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Monkeytype Autotyper</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Monkeytype Autotyper</h1>
+      <p id="status" class="status">Checking tab…</p>
+    </header>
+
+    <section id="wrong-site" hidden>
+      <p>Open a Monkeytype test to use the autotyper.</p>
+      <button id="open-mt" class="primary" type="button">Open monkeytype.com</button>
+    </section>
+
+    <section id="controls">
+      <div class="field">
+        <label for="wpm">Speed</label>
+        <div class="row">
+          <input id="wpm-range" type="range" min="10" max="400" step="5" />
+          <input id="wpm" type="number" min="10" max="400" step="1" />
+          <span class="unit">WPM</span>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="accuracy">Accuracy</label>
+        <div class="row">
+          <input id="accuracy-range" type="range" min="80" max="100" step="0.5" />
+          <input id="accuracy" type="number" min="80" max="100" step="0.5" />
+          <span class="unit">%</span>
+        </div>
+        <p class="hint">Below 100%, it makes typos and fixes them with backspace.</p>
+      </div>
+
+      <div class="field">
+        <label for="variance">Timing variation</label>
+        <div class="row">
+          <input id="variance-range" type="range" min="0" max="60" step="1" />
+          <input id="variance" type="number" min="0" max="60" step="1" />
+          <span class="unit">%</span>
+        </div>
+        <p class="hint">Random gaps between keys, so it doesn't type like a metronome.</p>
+      </div>
+
+      <label class="check">
+        <input id="showOverlay" type="checkbox" />
+        Show status pill on the page
+      </label>
+
+      <button id="toggle" class="primary" type="button" disabled>Start</button>
+
+      <p class="hint shortcut">
+        Shortcut: <kbd id="shortcut">not set</kbd>
+        · <a href="#" id="edit-shortcut">change</a>
+        <br />Pressing any key on the page also stops it.
+      </p>
+    </section>
+
+    <script src="../shared/settings.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

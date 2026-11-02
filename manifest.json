@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Monkeytype Autotyper",
+  "version": "0.1.0",
+  "description": "Types Monkeytype tests for you at a set WPM and accuracy, with human-like timing and typos.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["https://monkeytype.com/*", "https://*.monkeytype.com/*"],
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  },
+  "action": {
+    "default_title": "Monkeytype Autotyper",
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "commands": {
+    "toggle-autotyper": {
+      "suggested_key": {
+        "default": "Alt+Shift+A"
+      },
+      "description": "Start or stop autotyping"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://monkeytype.com/*", "https://*.monkeytype.com/*"],
+      "js": [
+        "src/shared/settings.js",
+        "src/content/keys.js",
+        "src/content/typer.js",
+        "src/content/main.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
