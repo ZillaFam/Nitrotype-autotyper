@@ -10,6 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const script = readFileSync(path.join(root, "nitrotype-autotyper.user.js"), "utf8");
 const mock = readFileSync(path.join(root, "test/mock-nitrotype.html"), "utf8");
 const shotDir = process.env.SCREENSHOT_DIR;
+const only = process.env.ONLY; // run one case by name substring
 
 const browser = await chromium.launch();
 let failures = 0;
@@ -19,83 +20,183 @@ function check(name, ok, detail = "") {
   if (!ok) failures++;
 }
 
-async function openRace(query, settings) {
-  const context = await browser.newContext({ viewport: { width: 1100, height: 700 } });
+const BASE = { wpmMin: 100, wpmMax: 100, accuracy: 100, variance: 25, nitros: 0, races: 1 };
+
+async function open(query, settings, ui) {
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   await context.route("https://www.nitrotype.com/**", (route) =>
     route.fulfill({ contentType: "text/html", body: mock }),
   );
-  await context.addInitScript((s) => {
-    localStorage.setItem("nt-autotyper-settings", JSON.stringify(s));
-  }, settings);
+  await context.addInitScript(
+    ([s, u]) => {
+      if (window !== window.top || sessionStorage.getItem("seeded")) return;
+      sessionStorage.setItem("seeded", "1");
+      localStorage.setItem("nt-autotyper-settings", JSON.stringify(s));
+      if (u) localStorage.setItem("nt-autotyper-ui", JSON.stringify(u));
+    },
+    [settings, ui],
+  );
   await context.addInitScript({ content: script });
   const page = await context.newPage();
   await page.goto(`https://www.nitrotype.com/race${query}`);
+  await page.waitForSelector(".go");
   return { context, page };
 }
 
-const raceFrame = (page) => page.frames().find((f) => f.url().includes("listen") || f === page.mainFrame());
+const raceFrame = (page) => page.frames().find((f) => f !== page.mainFrame()) ?? page.mainFrame();
+const results = (page) => raceFrame(page).evaluate(() => window.__results ?? []);
+const status = (page) => page.locator(".status").textContent();
 
-async function waitResult(page, frameQuery = false) {
-  const frame = frameQuery ? page.frames()[1] : page.mainFrame();
-  await frame.waitForFunction(() => window.__result, null, { timeout: 60000 });
-  return frame.evaluate(() => window.__result);
+async function waitForResults(page, n, timeout = 90000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    try {
+      if ((await results(page)).length >= n) return results(page);
+    } catch {
+      /* page reloading */
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error(`timed out waiting for ${n} race(s)`);
 }
 
-const panelStatus = (page) => page.locator(".status").textContent();
+async function test(name, fn) {
+  if (only && !name.includes(only)) return;
+  try {
+    await fn(name);
+  } catch (err) {
+    check(`${name}: ran without error`, false, err.message.split("\n")[0]);
+  }
+}
 
-async function raceCase({ name, query, settings, accTolerance = 3, inFrame = false }) {
-  const { context, page } = await openRace(query, settings);
-  const r = await waitResult(page, inFrame);
-  const detail = `wpm ${r.wpm.toFixed(1)}, acc ${r.accuracy.toFixed(1)}%, wrong ${r.wrong}`;
-  check(`${name}: finishes the race`, r.correct > 0, detail);
-  check(`${name}: no keys rejected as untrusted`, r.untrusted === 0, `untrusted ${r.untrusted}`);
-  check(`${name}: speed within 10% of ${settings.wpm}`, Math.abs(r.wpm - settings.wpm) / settings.wpm <= 0.1, `got ${r.wpm.toFixed(1)}`);
-  check(`${name}: accuracy near ${settings.accuracy}%`, Math.abs(r.accuracy - settings.accuracy) <= accTolerance, `got ${r.accuracy.toFixed(1)}%`);
-  await page.waitForTimeout(600);
-  check(`${name}: panel shows it finished`, (await panelStatus(page)) === "Race finished", await panelStatus(page));
-  await context.close();
-  return r;
+function checkRace(name, r, { wpm, accuracy, accTol = 3 }) {
+  check(`${name}: no events rejected as untrusted`, r.untrusted === 0, `untrusted ${r.untrusted}`);
+  check(`${name}: speed within 10% of ${wpm}`, Math.abs(r.wpm - wpm) / wpm <= 0.1, `got ${r.wpm.toFixed(1)}`);
+  check(`${name}: accuracy near ${accuracy}%`, Math.abs(r.accuracy - accuracy) <= accTol, `got ${r.accuracy.toFixed(1)}%, wrong ${r.wrong}`);
 }
 
 try {
-  const base = { wpm: 100, accuracy: 100, variance: 25, autoStart: true, collapsed: false };
+  await test("single race (keypress)", async (name) => {
+    const { context, page } = await open("?listen=keypress", { ...BASE, wpmMin: 120, wpmMax: 120 });
+    check(`${name}: idle until Start`, (await page.evaluate(() => document.querySelectorAll(".is-typed").length)) === 0);
+    check(`${name}: page's own synthetic events stay untrusted`, (await page.evaluate(() => window.__pageEventTrusted)) === false);
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    checkRace(name, r, { wpm: 120, accuracy: 100, accTol: 0 });
+    check(`${name}: waited for GO`, r.earlyKeys > 0, `${r.earlyKeys} probe keys before GO`);
+    await page.waitForTimeout(800);
+    check(`${name}: session ends after 1 race`, (await status(page)) === "Done: 1 race", await status(page));
+    await context.close();
+  });
 
-  const r1 = await raceCase({ name: "keypress listener", query: "?listen=keypress", settings: { ...base, wpm: 120 }, accTolerance: 0 });
-  check("keypress listener: countdown keys ignored, then starts", r1.earlyKeys > 0, `${r1.earlyKeys} probe keys before GO`);
-  await raceCase({ name: "keydown listener, 95%", query: "?listen=keydown", settings: { ...base, wpm: 150, accuracy: 95 } });
-  await raceCase({ name: "document.onkeypress handler", query: "?listen=onkeypress", settings: { ...base, wpm: 90, accuracy: 97 } });
-  await raceCase({ name: "input-event listener", query: "?listen=input", settings: { ...base, wpm: 110, accuracy: 96 } });
-  await raceCase({ name: "race inside an iframe", query: "?listen=keypress&frame=1", settings: { ...base, wpm: 100, accuracy: 97 }, inFrame: true });
+  for (const listen of ["keydown", "onkeypress", "input"]) {
+    await test(`listener: ${listen}`, async (name) => {
+      const { context, page } = await open(`?listen=${listen}`, { ...BASE, wpmMin: 110, wpmMax: 110, accuracy: 96 });
+      await page.locator(".go").click();
+      const [r] = await waitForResults(page, 1);
+      checkRace(name, r, { wpm: 110, accuracy: 96 });
+      await context.close();
+    });
+  }
 
-  // Manual mode: panel button, safety stop, shortcut.
-  const { context, page } = await openRace("?listen=keypress&countdown=300", { ...base, wpm: 60, autoStart: false });
-  await page.waitForTimeout(800);
-  const untouched = await page.evaluate(() => document.querySelectorAll(".is-typed").length);
-  check("auto-start off: waits for you", untouched === 0);
-  check("page's own synthetic events stay untrusted", (await page.evaluate(() => window.__pageEventTrusted)) === false);
-  if (shotDir) await page.screenshot({ path: path.join(shotDir, "panel.png"), clip: { x: 0, y: 380, width: 300, height: 320 } });
+  await test("nitros on the longest words", async (name) => {
+    const { context, page } = await open("?nitros=5", { ...BASE, nitros: 2 });
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    // Longest words of the first text: "vexingly" (8) and "jumps"/"quick"/... -> first two by length.
+    check(`${name}: used exactly 2`, r.nitroWords.length === 2, JSON.stringify(r.nitroWords));
+    check(`${name}: on the longest words`, r.nitroWords[0] === "vexingly" || r.nitroWords.includes("vexingly"), JSON.stringify(r.nitroWords));
+    check(`${name}: typing speed excludes the skip`, r.wpm > 100, `race WPM ${r.wpm.toFixed(1)} vs typing 100`);
+    await context.close();
+  });
 
-  await page.locator("button.toggle").click();
-  await page.waitForTimeout(1200);
-  const typedAfterStart = await page.evaluate(() => document.querySelectorAll(".is-typed").length);
-  check("Start button types", typedAfterStart > 3, `${typedAfterStart} letters`);
-  check("panel shows typing", (await panelStatus(page)) === "Typing…", await panelStatus(page));
+  await test("nitros: none left", async (name) => {
+    const { context, page } = await open("?nitros=0", { ...BASE, nitros: 3 });
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    check(`${name}: still finishes the race`, r.correct > 100 && r.nitroWords.length === 0, `wpm ${r.wpm.toFixed(1)}`);
+    await context.close();
+  });
 
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(300);
-  const atStop = await page.evaluate(() => document.querySelectorAll(".is-typed").length);
-  await page.waitForTimeout(600);
-  const afterStop = await page.evaluate(() => document.querySelectorAll(".is-typed").length);
-  check("real key press stops it", atStop === afterStop, await panelStatus(page));
+  await test("3 races with Race Again + WPM range + stats", async (name) => {
+    const { context, page } = await open("?listen=keypress&countdown=800", { ...BASE, wpmMin: 90, wpmMax: 130, accuracy: 97, races: 3 });
+    await page.locator(".go").click();
+    await page.waitForTimeout(1500);
+    check(`${name}: header shows race 1/3`, (await page.locator(".count").textContent()) === "race 1/3");
+    const rs = await waitForResults(page, 3, 120000);
+    check(`${name}: ran 3 races`, rs.length === 3);
+    for (const r of rs) check(`${name}: race in 90–130 WPM band (±10%)`, r.wpm >= 81 && r.wpm <= 143, `got ${r.wpm.toFixed(1)}`);
+    await page.waitForTimeout(8000);
+    check(`${name}: stops after 3`, (await raceFrame(page).evaluate(() => window.__results.length)) === 3 && (await status(page)) === "Done: 3 races", await status(page));
+    await page.locator('nav button[data-tab="stats"]').click();
+    check(`${name}: stats show 3 races`, (await page.locator(".s-races").textContent()) === "3");
+    check(`${name}: history has 3 rows`, (await page.locator(".history tr").count()) === 3);
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-stats.png") });
+    await context.close();
+  });
 
-  await page.keyboard.press("Alt+Shift+A");
-  await page.waitForTimeout(800);
-  const afterShortcut = await page.evaluate(() => document.querySelectorAll(".is-typed").length);
-  check("Alt+Shift+A starts it again", afterShortcut > afterStop, `${afterStop} -> ${afterShortcut}`);
-  await page.keyboard.press("Alt+Shift+A");
-  await page.waitForTimeout(300);
-  check("Alt+Shift+A stops it", (await page.locator("button.toggle").textContent()) === "Start");
-  await context.close();
+  await test("no Race Again button: reload fallback", async (name) => {
+    const { context, page } = await open("?again=none&countdown=800", { ...BASE, wpmMin: 200, wpmMax: 200, races: 2 });
+    await page.locator(".go").click();
+    const rs = await waitForResults(page, 2, 60000);
+    check(`${name}: second race after reload`, rs.length === 2);
+    await page.waitForTimeout(1000);
+    check(`${name}: session finished`, (await status(page)) === "Done: 2 races", await status(page));
+    await context.close();
+  });
+
+  await test("race inside an iframe, 2 races", async (name) => {
+    const { context, page } = await open("?frame=1&countdown=800", { ...BASE, wpmMin: 150, wpmMax: 150, accuracy: 97, races: 2, nitros: 1 });
+    await page.locator(".go").click();
+    const rs = await waitForResults(page, 2, 60000);
+    check(`${name}: 2 races typed in the iframe`, rs.length === 2);
+    checkRace(name, rs[0], { wpm: 150 * 1.07, accuracy: 97 }); // a nitro adds a few %
+    check(`${name}: nitro used`, rs.every((r) => r.nitroWords.length === 1));
+    await page.waitForTimeout(1000);
+    check(`${name}: panel shows done`, (await status(page)) === "Done: 2 races", await status(page));
+    await context.close();
+  });
+
+  await test("controls: stop key, shortcut, drag, collapse", async (name) => {
+    const { context, page } = await open("?countdown=300", { ...BASE, wpmMin: 60, wpmMax: 60, races: 3 });
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-race.png") });
+    await page.locator(".go").click();
+    await page.waitForTimeout(1500);
+    const typed = () => page.evaluate(() => document.querySelectorAll(".is-typed").length);
+    check(`${name}: Start types`, (await typed()) > 3);
+    check(`${name}: live chips show target`, (await page.locator(".chips").textContent()).includes("target 60"), await page.locator(".chips").textContent());
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-typing.png") });
+
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    const atStop = await typed();
+    await page.waitForTimeout(600);
+    check(`${name}: real key press stops the session`, atStop === (await typed()) && (await page.locator(".go").textContent()) === "Start", await status(page));
+
+    await page.keyboard.press("Alt+Shift+A");
+    await page.waitForTimeout(900);
+    check(`${name}: Alt+Shift+A starts again`, (await typed()) > atStop);
+    await page.keyboard.press("Alt+Shift+A");
+    await page.waitForTimeout(300);
+    check(`${name}: Alt+Shift+A stops`, (await page.locator(".go").textContent()) === "Start");
+
+    const before = await page.locator(".box").boundingBox();
+    await page.mouse.move(before.x + 60, before.y + 15);
+    await page.mouse.down();
+    await page.mouse.move(before.x + 360, before.y - 185, { steps: 8 });
+    await page.mouse.up();
+    const after = await page.locator(".box").boundingBox();
+    check(`${name}: drag moves the panel`, Math.abs(after.x - before.x - 300) < 3 && Math.abs(after.y - before.y + 200) < 3, `${before.x},${before.y} -> ${after.x},${after.y}`);
+
+    await page.locator(".collapse").click();
+    const collapsed = await page.locator(".box").boundingBox();
+    check(`${name}: collapse shrinks it`, collapsed.height < 60, `height ${collapsed.height}`);
+    await page.reload();
+    await page.waitForSelector(".go", { state: "attached" });
+    const reloaded = await page.locator(".box").boundingBox();
+    check(`${name}: position and collapse remembered`, Math.abs(reloaded.x - after.x) < 3 && reloaded.height < 60, `${reloaded.x},${reloaded.y} h${reloaded.height}`);
+    await context.close();
+  });
 } finally {
   await browser.close();
 }

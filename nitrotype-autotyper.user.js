@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      1.0.0
-// @description  Types Nitro Type races for you at a set WPM and accuracy, with human-like timing and typos.
+// @version      2.0.0
+// @description  Types Nitro Type races for you: a WPM range, target accuracy, human-like rhythm and typos, nitros on the longest words, and multi-race sessions with stats.
 // @match        https://www.nitrotype.com/*
 // @match        https://nitrotype.com/*
 // @match        https://*.nitrotype.com/*
@@ -13,19 +13,22 @@
 /*
  * How it works
  * ------------
- * 1. Nitro Type ignores keyboard events that scripts create (event.isTrusted
- *    is false for them). Before any Nitro Type code runs (@run-at
- *    document-start), we wrap addEventListener and the on<key> properties so
- *    that, for events *this script* dispatched, listeners see isTrusted: true.
- *    Real events from your keyboard are passed through untouched.
- * 2. The race text is read from the .dash-letter spans, and the current
- *    position from their classes (is-waiting / is-correct / is-typed).
- * 3. For each letter we dispatch keydown -> keypress -> (input) -> keyup,
- *    exactly like a real key press. Nitro Type doesn't move on after a wrong
- *    key, so a typo is a wrong key, a short pause, then the right key.
+ * 1. Nitro Type ignores events that scripts create (event.isTrusted is
+ *    false). Before any Nitro Type code runs (@run-at document-start) we wrap
+ *    addEventListener and the on<event> properties so that, for events *this
+ *    script* dispatched, listeners see isTrusted: true. Real events from you
+ *    and the page's own events pass through untouched.
+ * 2. The race text comes from the .dash-letter spans, the position from
+ *    their classes (is-waiting / is-correct / is-typed).
+ * 3. Each letter is keydown -> keypress -> (input) -> keyup, like a real key.
+ *    Nitro Type stays on a letter after a wrong key, so a typo is a wrong
+ *    key, a pause, then the right key. A nitro is Enter at the start of a word.
+ * 4. A session runs N races: after each one it clicks "Race Again" (or
+ *    reloads the race page if there's no button) and goes again.
  *
- * If the race runs inside an iframe, the script runs there too; the control
- * panel lives in the top page and talks to it with postMessage.
+ * Frames: if the race is inside an iframe the script runs there too. The
+ * panel and the session live in the top page; typing happens in whichever
+ * frame has the race. They talk with postMessage.
  */
 
 (() => {
@@ -34,14 +37,17 @@
   window.__NT_AUTOTYPER__ = true;
 
   const IS_TOP = window === window.top;
-  const MSG_TAG = "nt-autotyper";
+  const TAG = "nt-autotyper";
   const LOG = (...args) => console.debug("[NT Autotyper]", ...args);
 
   // =========================================================================
   // 1. Trusted-event shim. Must run before Nitro Type registers listeners.
   // =========================================================================
 
-  const SPOOFED_TYPES = ["keydown", "keypress", "keyup", "beforeinput", "input", "textInput"];
+  const SPOOFED_TYPES = [
+    "keydown", "keypress", "keyup", "beforeinput", "input", "textInput",
+    "pointerdown", "mousedown", "pointerup", "mouseup", "click",
+  ];
   const SPOOFED = new Set(SPOOFED_TYPES);
   const ourEvents = new WeakSet();
   const trustedViews = new WeakMap();
@@ -87,7 +93,7 @@
   };
 
   // Same for handlers assigned as properties, e.g. document.onkeypress = fn.
-  for (const proto of [HTMLElement.prototype, Document.prototype, Window.prototype, window]) {
+  for (const proto of [HTMLElement.prototype, Document.prototype, window]) {
     for (const type of SPOOFED_TYPES) {
       const desc = Object.getOwnPropertyDescriptor(proto, `on${type}`);
       if (!desc?.set || !desc.configurable) continue;
@@ -105,6 +111,9 @@
       });
     }
   }
+
+  // Our own listeners use the native method so they see the real isTrusted.
+  const listen = (target, type, fn, opts) => nativeAdd.call(target, type, fn, opts);
 
   // =========================================================================
   // 2. Keyboard knowledge (US QWERTY)
@@ -139,6 +148,8 @@
     return out;
   }
 
+  const baseKey = (ch) => SHIFTED[ch] ?? ch.toLowerCase();
+
   /** { key, code, keyCode, shift } for the key that types `ch`. */
   function keyFor(ch) {
     if (ch === " ") return { key: " ", code: "Space", keyCode: 32, shift: false };
@@ -159,9 +170,9 @@
   }
 
   /** A neighbouring-key typo for `ch`, or null. */
-  function typoFor(ch) {
+  function neighbourTypo(ch) {
     if (ch === " " || ch === "\n") return null;
-    const base = SHIFTED[ch] ?? ch.toLowerCase();
+    const base = baseKey(ch);
     const near = neighbours(base);
     if (!near.length) return null;
     const letters = near.filter((c) => c >= "a" && c <= "z");
@@ -170,11 +181,31 @@
     return ch !== ch.toLowerCase() ? pick.toUpperCase() : pick;
   }
 
+  /**
+   * The wrong key a person might hit instead of text[i]: the next letter
+   * too early (fingers out of order), the previous key again (double tap),
+   * or most often a neighbouring key.
+   */
+  function makeTypo(text, i) {
+    const ch = text[i];
+    const prev = text[i - 1];
+    const next = text[i + 1];
+    const r = Math.random();
+    if (r < 0.25 && next && next !== " " && next !== ch) return next;
+    if (r < 0.4 && prev && prev !== " " && prev !== ch) return prev;
+    return neighbourTypo(ch);
+  }
+
   // =========================================================================
-  // 3. Synthesising key presses
+  // 3. Synthesising input
   // =========================================================================
 
-  function legacy(event, keyCode, charCode) {
+  function fire(target, event) {
+    ourEvents.add(event);
+    return target.dispatchEvent(event);
+  }
+
+  function withLegacyCodes(event, keyCode, charCode) {
     // keyCode/which/charCode can't be set through the constructor.
     for (const [prop, value] of [["keyCode", keyCode], ["which", keyCode || charCode], ["charCode", charCode]]) {
       Object.defineProperty(event, prop, { get: () => value });
@@ -182,28 +213,23 @@
     return event;
   }
 
-  function fire(target, event) {
-    ourEvents.add(event);
-    return target.dispatchEvent(event);
-  }
-
   function fireKey(target, type, k, keyCode, charCode) {
     const init = { key: k.key, code: k.code, shiftKey: k.shift, bubbles: true, cancelable: true, composed: true, view: window };
-    return fire(target, legacy(new KeyboardEvent(type, init), keyCode, charCode));
+    return fire(target, withLegacyCodes(new KeyboardEvent(type, init), keyCode, charCode));
   }
-
-  const nativeValueSetter = (el) => Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
 
   function insertText(target, ch) {
     if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
     const init = { inputType: "insertText", data: ch, bubbles: true, composed: true };
     if (!fire(target, new InputEvent("beforeinput", { ...init, cancelable: true }))) return;
     // Use the native setter so React-controlled inputs notice the change.
-    const setter = nativeValueSetter(target);
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(target), "value")?.set;
     if (setter) setter.call(target, target.value + ch);
     else target.value += ch;
     fire(target, new InputEvent("input", init));
   }
+
+  let panelHost = null; // set in the top page once the panel is built
 
   function typingTarget() {
     const active = document.activeElement;
@@ -223,11 +249,11 @@
   function pressKey(ch, holdMs) {
     const target = typingTarget();
     const k = keyFor(ch);
-    const shiftKey = { key: "Shift", code: LEFT_HAND.has(SHIFTED[ch] ?? ch.toLowerCase()) ? "ShiftRight" : "ShiftLeft", shift: true };
+    const shiftKey = { key: "Shift", code: LEFT_HAND.has(baseKey(ch)) ? "ShiftRight" : "ShiftLeft", shift: true };
     if (k.shift) fireKey(target, "keydown", shiftKey, 16, 0);
     if (fireKey(target, "keydown", k, k.keyCode, 0)) {
       const charCode = ch === "\n" ? 13 : ch.charCodeAt(0);
-      if (fireKey(target, "keypress", k, charCode, charCode)) insertText(target, ch);
+      if (fireKey(target, "keypress", k, charCode, charCode) && ch !== "\n") insertText(target, ch);
     }
     setTimeout(() => {
       fireKey(target, "keyup", k, k.keyCode, 0);
@@ -235,11 +261,25 @@
     }, holdMs);
   }
 
+  function clickElement(el) {
+    const r = el.getBoundingClientRect();
+    const init = {
+      bubbles: true, cancelable: true, composed: true, view: window, button: 0,
+      clientX: r.left + r.width * (0.3 + Math.random() * 0.4),
+      clientY: r.top + r.height * (0.3 + Math.random() * 0.4),
+    };
+    fire(el, new PointerEvent("pointerdown", { ...init, pointerType: "mouse", isPrimary: true }));
+    fire(el, new MouseEvent("mousedown", init));
+    fire(el, new PointerEvent("pointerup", { ...init, pointerType: "mouse", isPrimary: true }));
+    fire(el, new MouseEvent("mouseup", init));
+    fire(el, new MouseEvent("click", init));
+  }
+
   // =========================================================================
   // 4. Reading the race
   // =========================================================================
 
-  /** { text, pos, id } or null. pos is null when the classes give no clue. */
+  /** { text, pos, id, firstClass } or null. pos is null when the classes give no clue. */
   function readRace() {
     const spans = document.querySelectorAll(".dash-letter");
     if (!spans.length) return null;
@@ -261,14 +301,69 @@
 
   const sameRace = (a, b) => Boolean(a && b && a.id === b.id && a.text === b.text);
 
+  /** Word start indexes of the `count` longest words (ties: earlier first). */
+  function nitroWordStarts(text, count) {
+    if (count <= 0) return new Set();
+    const words = [];
+    const re = /\S+/g;
+    let m;
+    while ((m = re.exec(text))) words.push({ start: m.index, len: m[0].length });
+    words.sort((a, b) => b.len - a.len || a.start - b.start);
+    return new Set(words.slice(0, count).map((w) => w.start));
+  }
+
+  function findRaceAgainButton() {
+    const candidates = document.querySelectorAll("button, a, [role=button]");
+    for (const el of candidates) {
+      const label = (el.textContent || el.getAttribute("aria-label") || "").trim();
+      if (/race again|next race|play again|new race/i.test(label) && el.getClientRects().length) return el;
+    }
+    return null;
+  }
+
   // =========================================================================
-  // 5. Typing engine
+  // 5. Human rhythm
+  // =========================================================================
+
+  const COMMON_BIGRAMS = new Set(
+    "th he in er an re on at en nd ti es or te of ed is it al ar st to nt ng se ha as ou io le ve co me de hi ri ro ic ne ea ra ce li ch ll be ma si om ur".split(" "),
+  );
+
+  /** How long letter i takes relative to the average (before normalising). */
+  function rhythmFactor(text, i) {
+    const ch = text[i];
+    const prev = text[i - 1] ?? " ";
+    const progress = i / text.length;
+    let f = 1;
+    if (ch === " ") f *= 0.85;
+    else if (prev === " ") f *= 1.2; // starting a new word
+    if (ch !== ch.toLowerCase()) f *= 1.45; // reach for Shift
+    else if (ch >= "0" && ch <= "9") f *= 1.5;
+    else if (/[^a-z ]/.test(ch)) f *= 1.35; // punctuation
+    if (prev === ch) f *= 0.8; // double letters roll
+    else if (COMMON_BIGRAMS.has((prev + ch).toLowerCase())) f *= 0.8;
+    if (progress < 0.05) f *= 1.4 - (progress / 0.05) * 0.4; // warming up
+    else if (progress > 0.9) f *= 0.9; // final push
+    return f;
+  }
+
+  function rhythmFor(text) {
+    const factors = [...text].map((_, i) => rhythmFactor(text, i));
+    const mean = factors.reduce((a, b) => a + b, 0) / factors.length;
+    return factors.map((f) => f / mean);
+  }
+
+  // =========================================================================
+  // 6. Typing engine (runs in every frame; types the race in its own frame)
   // =========================================================================
 
   const REACTION_MS = [140, 320]; // pause after a typo before the right key
-  const PROBE_MS = 120; // how often to try the first key while waiting for "GO"
-  const MAX_WAIT_MS = 90000; // give up waiting for "GO" after this long
-  const RETRY_MS = 250; // re-send a key Nitro Type didn't register after this long
+  const HESITATE_CHANCE = 0.04; // chance of a short "thinking" pause before a word
+  const HESITATE_MS = [150, 450];
+  const PROBE_MS = 120; // how often to try the first key while waiting for GO
+  const MAX_WAIT_MS = 90000; // give up waiting for GO after this long
+  const RETRY_MS = 250; // re-send a key Nitro Type didn't take after this long
+  const NITRO_WAIT_MS = 350; // how long to wait for a nitro to kick in
   const STALL_MS = 5000;
   const PACE_GAIN = 0.3;
 
@@ -285,72 +380,97 @@
   const typoChance = (acc) => (acc >= 100 ? 0 : Math.min(0.5, (100 / acc - 1) * 1.2));
 
   const engine = {
-    runId: 0,
-    running: false,
     settings: null,
+    armed: false, // part of an active session: type every new race
+    running: false,
+    runId: 0,
     lastRace: null, // the race we last typed (or were stopped in)
-    status: { running: false, message: "Idle", hasRace: false },
+    lastLiveAt: 0,
 
-    setStatus(running, message) {
-      this.running = running;
-      this.status = { running, message, hasRace: Boolean(readRace()) };
-      reportStatus(this.status);
+    status(message, extra = {}) {
+      toTop({ kind: "status", status: { running: this.running, message, hasRace: Boolean(readRace()), ...extra } });
     },
 
-    start(settings) {
-      if (settings) this.settings = settings;
-      if (this.running) return;
-      if (!readRace()) {
-        // Frames without a race stay quiet unless nothing else answers.
-        this.setStatus(false, this.settings.autoStart ? "No race yet. Will start when one opens." : "No race on this page");
+    setArmed(armed) {
+      if (armed === this.armed) return;
+      this.armed = armed;
+      if (armed) {
+        // A fresh start resumes an unfinished race, but skips a finished one.
+        const race = readRace();
+        this.lastRace = race && race.pos !== null && race.pos >= race.text.length ? race : null;
+      } else if (this.running) {
+        this.abort("Stopped");
+      }
+    },
+
+    abort(message) {
+      this.runId++;
+      this.running = false;
+      const race = readRace();
+      if (race) this.lastRace = race;
+      this.status(message);
+    },
+
+    tick() {
+      if (!this.armed || this.running || !this.settings) return;
+      const race = readRace();
+      if (!race || sameRace(race, this.lastRace)) return;
+      if (race.pos !== null && race.pos >= race.text.length) {
+        // Joined on a results screen: move on to the next race.
+        this.lastRace = race;
+        toTop({ kind: "needNext" });
         return;
       }
-      const id = ++this.runId;
-      this.run(id).catch((err) => {
+      this.run(race).catch((err) => {
         console.error("[NT Autotyper]", err);
-        if (id === this.runId) this.setStatus(false, `Error: ${err.message}`);
+        this.running = false;
+        this.status(`Error: ${err.message}`);
       });
     },
 
-    stop(message = "Stopped") {
-      if (!this.running) return;
-      this.runId++;
-      const race = readRace();
-      if (race) this.lastRace = race; // don't auto-restart this race
-      this.setStatus(false, message);
-    },
-
-    async run(id) {
+    async run(startRace) {
+      const id = ++this.runId;
       const alive = () => id === this.runId;
-      const halt = (message) => alive() && (this.runId++, this.setStatus(false, message));
+      this.running = true;
+      this.lastRace = startRace;
 
-      let race = readRace();
-      const startRace = race;
-      this.lastRace = race;
-      const text = race.text;
+      const s = this.settings;
+      const text = startRace.text;
+      const target = Math.round(rand(Math.min(s.wpmMin, s.wpmMax), Math.max(s.wpmMin, s.wpmMax) + 0.999));
+      const rhythm = rhythmFor(text);
+      const nitroAt = nitroWordStarts(text, s.nitros);
       LOG("race text:", text);
       LOG("letter classes:", [...document.querySelectorAll(".dash-letter")].slice(0, 3).map((el) => el.className));
+      LOG("target WPM:", target, "nitro words at:", [...nitroAt]);
       focusRace();
 
-      // Wait for "GO": keep trying the first key until Nitro Type accepts it.
-      this.setStatus(true, "Waiting for the race to start…");
+      // Wait for GO: keep trying the first key until Nitro Type takes it.
+      this.status("Waiting for the race to start…", { target });
       const waitStart = performance.now();
+      let race = startRace;
       while (alive()) {
         race = readRace();
-        if (!sameRace(race, startRace)) return halt("Race closed");
+        if (!sameRace(race, startRace)) return this.finishRun(id, "Race closed");
         if (race.pos !== null && race.pos > 0) break;
         if (race.pos === null && race.firstClass !== startRace.firstClass) {
           // Something changed, but not in a way we understand: don't keep
           // hammering the first key into a running race.
-          return halt("Can't read the race progress (Nitro Type changed its page?)");
+          return this.finishRun(id, "Can't read the race progress (Nitro Type changed its page?)");
         }
-        if (performance.now() - waitStart > MAX_WAIT_MS) return halt("Race didn't start");
+        if (performance.now() - waitStart > MAX_WAIT_MS) return this.finishRun(id, "Race didn't start");
         pressKey(text[0], rand(40, 90));
         await sleep(PROBE_MS);
       }
       if (!alive()) return;
-      this.setStatus(true, "Typing…");
+      toTop({ kind: "raceStart" });
 
+      const startedAt = performance.now() - PROBE_MS / 2;
+      let correct = race.pos; // the probe that got through
+      let wrong = 0;
+      let nitrosUsed = 0;
+      let skipped = 0; // letters skipped by nitros (not counted for pacing)
+      let pendingNitro = -1;
+      const triedNitro = new Set();
       let pace = null;
       let lastPos = -1;
       let lastPressAt = 0;
@@ -363,146 +483,204 @@
         await sleep(nextAt - performance.now());
         if (!alive()) return;
         race = readRace();
-        if (!sameRace(race, startRace) || race.pos === null || race.pos >= text.length) {
-          return halt("Race finished");
-        }
-
+        if (!sameRace(race, startRace)) return this.finishRun(id, "Race closed");
         const now = performance.now();
         const pos = race.pos;
+
+        if (pos === null || pos >= text.length) {
+          const minutes = (now - startedAt) / 60000;
+          return this.finishRun(id, "Race finished", {
+            wpm: text.length / 5 / minutes,
+            accuracy: (100 * correct) / Math.max(1, correct + wrong),
+            nitros: nitrosUsed,
+            target,
+            chars: text.length,
+            at: Date.now(),
+          });
+        }
+
+        if (pendingNitro >= 0) {
+          if (pos > pendingNitro) {
+            nitrosUsed++;
+            skipped += pos - pendingNitro;
+          } else if (now - lastPressAt < NITRO_WAIT_MS) {
+            nextAt = now + 15;
+            continue;
+          }
+          pendingNitro = -1; // didn't work (none left?): type the word instead
+        }
+
         if (pos !== lastPos) {
           lastPos = pos;
           lastProgressAt = now;
         } else if (now - lastProgressAt > STALL_MS) {
-          return halt("Stopped: Nitro Type isn't accepting keys");
+          return this.finishRun(id, "Stopped: Nitro Type isn't accepting keys");
         } else if (pos === lastPressPos && now - lastPressAt < RETRY_MS) {
-          // Last key not registered yet; give the page a moment.
-          nextAt = now + 10;
+          nextAt = now + 10; // last key not registered yet
           continue;
         }
 
-        const { wpm, accuracy, variance } = this.settings;
-        const pTypo = typoChance(accuracy);
-        const perChar = 12000 / wpm; // 60 s / (wpm * 5 chars)
-        const interval = Math.max(5, (perChar - pTypo * (REACTION_MS[0] + REACTION_MS[1]) / 2) / (1 + pTypo));
-        const ch = text[pos];
+        if (now - this.lastLiveAt > 250) {
+          this.lastLiveAt = now;
+          const liveWpm = (pos - skipped) / 5 / ((now - startedAt) / 60000);
+          this.status("Typing…", { target, pos, len: text.length, wpm: liveWpm, nitros: nitrosUsed });
+        }
 
-        // Occasionally hit a neighbouring key first. Nitro Type stays on the
-        // letter, so after a pause we just press the right one.
+        // Nitro at the start of one of the longest words.
+        if (nitroAt.has(pos) && !triedNitro.has(pos)) {
+          triedNitro.add(pos);
+          pressKey("\n", rand(40, 90));
+          pendingNitro = pos;
+          lastPressAt = now;
+          nextAt = now + 30;
+          continue;
+        }
+
+        const { accuracy, variance } = this.settings;
+        const pTypo = typoChance(accuracy);
+        const perChar = 12000 / target; // 60 s / (wpm * 5 chars)
+        const interval = Math.max(5, (perChar - (pTypo * (REACTION_MS[0] + REACTION_MS[1])) / 2) / (1 + pTypo));
+
+        // Sometimes hit the wrong key first, then (after a beat) the right one.
         if (lastTypoPos !== pos && Math.random() < pTypo) {
-          const typo = typoFor(ch);
           lastTypoPos = pos;
+          const typo = makeTypo(text, pos);
           if (typo) {
             pressKey(typo, rand(40, 100));
+            wrong++;
             nextAt = now + rand(REACTION_MS[0], REACTION_MS[1]);
             continue;
           }
         }
 
-        pressKey(ch, rand(40, 100));
+        pressKey(text[pos], rand(40, 100));
+        correct++;
         lastPressAt = now;
         lastPressPos = pos;
 
-        // Steer toward the target WPM using real progress.
-        if (!pace || pace.wpm !== wpm) pace = { at: now, pos, wpm };
-        const behindMs = now - pace.at - (pos - pace.pos) * perChar;
+        // Steer toward the target WPM from real progress (nitros excluded).
+        const typedSoFar = pos - skipped;
+        if (!pace) pace = { at: now, typed: typedSoFar };
+        const behindMs = now - pace.at - (typedSoFar - pace.typed) * perChar;
         const correction = Math.min(1.5 * interval, Math.max(-0.6 * interval, -behindMs * PACE_GAIN));
         const jitter = Math.min(2.5, Math.max(0.35, 1 + gaussian() * (variance / 100)));
-        nextAt = Math.max(nextAt, now - interval) + Math.max(2, interval * jitter + correction);
+        let gap = interval * (rhythm[pos + 1] ?? 1) * jitter + correction;
+        if (text[pos] === " " && Math.random() < HESITATE_CHANCE) gap += rand(HESITATE_MS[0], HESITATE_MS[1]);
+        nextAt = Math.max(nextAt, now - interval) + Math.max(2, gap);
       }
+    },
+
+    finishRun(id, message, result) {
+      if (id !== this.runId) return;
+      this.running = false;
+      this.status(message, result ? { target: result.target, wpm: result.wpm, done: true } : {});
+      if (result) toTop({ kind: "raceDone", result });
+    },
+
+    nextRace() {
+      const race = readRace();
+      if (!race) return;
+      const button = findRaceAgainButton();
+      if (button) {
+        LOG("clicking", button.textContent.trim());
+        clickElement(button);
+      }
+    },
+
+    reloadRace() {
+      if (readRace()) location.reload();
     },
   };
 
-  // Auto-start: begin typing whenever a new race shows up.
-  setInterval(() => {
-    if (engine.running || !engine.settings?.autoStart) return;
-    const race = readRace();
-    if (race && !sameRace(race, engine.lastRace)) engine.start();
-  }, 300);
+  setInterval(() => engine.tick(), 250);
 
-  // Safety stop: a real key press (not the shortcut) hands control back.
-  // Registered with the native method so it sees the real isTrusted.
-  nativeAdd.call(
+  // Safety stop and shortcut, in every frame.
+  const isShortcut = (e) => e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyA";
+  listen(
     window,
     "keydown",
     (e) => {
       if (!e.isTrusted) return;
       if (isShortcut(e)) {
         e.preventDefault();
-        sendCommand("toggle");
+        toTop({ kind: "toggle" });
         return;
       }
       if (!engine.running) return;
       const path = e.composedPath();
-      if (path.includes(panelHost) && path[0].tagName === "INPUT") return; // editing a setting
+      if (panelHost && path.includes(panelHost) && path[0].tagName === "INPUT") return; // editing a setting
       if (e.altKey || e.ctrlKey || e.metaKey || ["Shift", "Alt", "Control", "Meta", "CapsLock"].includes(e.key)) return;
-      engine.stop("Stopped: you pressed a key");
+      engine.abort("Stopped: you pressed a key");
+      toTop({ kind: "stop", message: "Stopped: you pressed a key" });
     },
     true,
   );
 
-  const isShortcut = (e) => e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyA";
-
   // =========================================================================
-  // 6. Messaging between frames (the race may be inside an iframe)
+  // 7. Messaging between frames
   // =========================================================================
 
-  // Commands go from the top page to every frame; statuses come back up.
-  function broadcast(msg, win = window) {
+  // down: top page -> every engine. up: any engine -> top page.
+  function toFrames(msg, win = window) {
     for (let i = 0; i < win.frames.length; i++) {
       try {
-        win.frames[i].postMessage({ tag: MSG_TAG, ...msg }, "*");
+        win.frames[i].postMessage({ tag: TAG, dir: "down", ...msg }, "*");
       } catch {
         /* frame went away */
       }
     }
   }
 
-  function handleCommand(cmd, settings) {
-    if (settings) engine.settings = settings;
-    if (cmd === "start") engine.start();
-    else if (cmd === "stop") engine.stop();
-    else if (cmd === "settings") {
-      /* settings already applied */
-    }
+  function toEngines(msg) {
+    engineHandle(msg);
+    toFrames(msg);
   }
 
-  // Called from any frame; the top page decides and fans out.
-  function sendCommand(cmd) {
-    if (!IS_TOP) {
-      window.top.postMessage({ tag: MSG_TAG, request: cmd }, "*");
-      return;
-    }
-    if (cmd === "toggle") cmd = panel.anyRunning() ? "stop" : "start";
-    const settings = loadSettings();
-    handleCommand(cmd, settings);
-    broadcast({ cmd, settings });
+  function toTop(msg) {
+    if (IS_TOP) topHandle(msg, window);
+    else window.top.postMessage({ tag: TAG, dir: "up", ...msg }, "*");
   }
 
-  function reportStatus(status) {
-    if (IS_TOP) panel.onStatus(status, window);
-    else window.top.postMessage({ tag: MSG_TAG, status }, "*");
+  function engineHandle(msg) {
+    if (msg.settings) engine.settings = msg.settings;
+    if (typeof msg.armed === "boolean") engine.setArmed(msg.armed);
+    if (msg.cmd === "next") engine.nextRace();
+    if (msg.cmd === "reload") engine.reloadRace();
   }
 
-  window.addEventListener("message", (e) => {
+  listen(window, "message", (e) => {
     const data = e.data;
-    if (!data || data.tag !== MSG_TAG) return;
-    if (data.cmd) {
-      handleCommand(data.cmd, data.settings);
-      broadcast(data); // pass it on to nested frames
-    } else if (IS_TOP && data.request) {
-      sendCommand(data.request);
-    } else if (IS_TOP && data.status) {
-      panel.onStatus(data.status, e.source);
+    if (!data || data.tag !== TAG) return;
+    if (data.dir === "down") {
+      engineHandle(data);
+      toFrames(data); // pass it on to nested frames
+    } else if (data.dir === "up" && IS_TOP) {
+      topHandle(data, e.source);
     }
   });
 
   // =========================================================================
-  // 7. Settings and control panel (top page only)
+  // 8. Settings, session and stats (top page)
   // =========================================================================
 
-  const DEFAULTS = { wpm: 90, accuracy: 97, variance: 25, autoStart: true, collapsed: false };
-  const LIMITS = { wpm: [10, 300], accuracy: [80, 100], variance: [0, 60] };
-  const STORAGE_KEY = "nt-autotyper-settings";
+  const DEFAULTS = { wpmMin: 80, wpmMax: 95, accuracy: 97, variance: 25, nitros: 1, races: 5 };
+  const LIMITS = { wpmMin: [10, 300], wpmMax: [10, 300], accuracy: [80, 100], variance: [0, 60], nitros: [0, 10], races: [1, 500] };
+  const KEYS = { settings: "nt-autotyper-settings", stats: "nt-autotyper-stats", ui: "nt-autotyper-ui", session: "nt-autotyper-session" };
+
+  function readJSON(storage, key, fallback) {
+    try {
+      return JSON.parse(storage.getItem(key)) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  function writeJSON(storage, key, value) {
+    try {
+      storage.setItem(key, JSON.stringify(value));
+    } catch {
+      /* storage blocked: keep it in memory only */
+    }
+  }
 
   function normalize(raw) {
     const s = { ...DEFAULTS, ...raw };
@@ -510,155 +688,488 @@
       const n = Number(s[key]);
       s[key] = Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : DEFAULTS[key];
     }
-    s.autoStart = Boolean(s.autoStart);
-    s.collapsed = Boolean(s.collapsed);
+    for (const key of ["wpmMin", "wpmMax", "nitros", "races", "variance"]) s[key] = Math.round(s[key]);
     return s;
   }
 
-  function loadSettings() {
-    try {
-      return normalize(JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"));
-    } catch {
-      return normalize({});
-    }
-  }
+  const loadSettings = () => normalize(readJSON(localStorage, KEYS.settings, {}));
+  engine.settings = loadSettings(); // same-origin frames share localStorage
 
-  function saveSettings(s) {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-    } catch {
-      /* storage blocked; settings last for this page only */
-    }
-  }
+  // The session lives in sessionStorage so it survives a reload of this tab
+  // (used to get a fresh race) but never restarts by itself in a new tab.
+  const session = {
+    state: { active: false, total: 0, done: 0 },
+    stats: [], // finished races, newest last
+    fallbackTimer: 0,
+    nextTimer: 0,
+    message: "Idle",
+    messageAt: 0,
 
-  let panelHost = null;
-  const panel = {
-    statuses: new Map(), // frame window -> latest status
-    anyRunning() {
-      return [...this.statuses.values()].some((s) => s.running);
+    say(message) {
+      this.message = message;
+      this.messageAt = Date.now();
+      panel.render();
     },
-    onStatus(status, source) {
-      this.statuses.set(source, status);
-      this.render?.();
+    init() {
+      this.state = { ...this.state, ...readJSON(sessionStorage, KEYS.session, {}) };
+      this.stats = readJSON(localStorage, KEYS.stats, []);
+    },
+    save() {
+      writeJSON(sessionStorage, KEYS.session, this.state);
+    },
+    sync() {
+      toEngines({ settings: loadSettings(), armed: this.state.active });
+    },
+    start() {
+      const s = loadSettings();
+      this.state = { active: true, total: s.races, done: 0 };
+      this.save();
+      this.sync();
+      this.say("Waiting for a race…");
+    },
+    stop(message) {
+      clearTimeout(this.fallbackTimer);
+      clearTimeout(this.nextTimer);
+      this.state.active = false;
+      this.save();
+      this.sync();
+      this.say(message);
+    },
+    toggle() {
+      if (this.state.active) this.stop("Stopped");
+      else this.start();
+    },
+    raceStarted() {
+      clearTimeout(this.fallbackTimer);
+    },
+    raceDone(result) {
+      this.stats.push(result);
+      if (this.stats.length > 300) this.stats.splice(0, this.stats.length - 300);
+      writeJSON(localStorage, KEYS.stats, this.stats);
+      if (!this.state.active) return panel.render();
+      this.state.done++;
+      this.save();
+      if (this.state.done >= this.state.total) {
+        this.stop(`Done: ${this.state.total} race${this.state.total === 1 ? "" : "s"}`);
+      } else {
+        this.say("Next race soon…");
+        this.scheduleNext(rand(2500, 6000));
+      }
+    },
+    scheduleNext(delay) {
+      clearTimeout(this.nextTimer);
+      this.nextTimer = setTimeout(() => {
+        if (!this.state.active) return;
+        toEngines({ cmd: "next" });
+        // No new race soon (no button found?): reload the race page.
+        clearTimeout(this.fallbackTimer);
+        this.fallbackTimer = setTimeout(() => this.state.active && toEngines({ cmd: "reload" }), 12000);
+      }, delay);
+    },
+    resetStats() {
+      this.stats = [];
+      writeJSON(localStorage, KEYS.stats, this.stats);
+      panel.render();
     },
   };
 
-  // Same-origin frames share localStorage; others get settings by message.
-  engine.settings = loadSettings();
+  function topHandle(msg, source) {
+    switch (msg.kind) {
+      case "status":
+        panel.statuses.set(source, { ...msg.status, at: Date.now() });
+        panel.render();
+        break;
+      case "raceStart":
+        session.raceStarted();
+        break;
+      case "raceDone":
+        session.raceDone(msg.result);
+        break;
+      case "needNext":
+        if (session.state.active) session.scheduleNext(800);
+        break;
+      case "stop":
+        session.stop(msg.message);
+        break;
+      case "toggle":
+        session.toggle();
+        break;
+    }
+  }
+
+  // =========================================================================
+  // 9. Control panel (top page)
+  // =========================================================================
+
+  const panel = {
+    statuses: new Map(), // frame window -> latest engine status
+    render() {},
+  };
 
   if (IS_TOP) {
-    // Child frames start with no settings until the first command; send them
-    // whenever a frame says hello by reporting a status, and on page load.
-    window.addEventListener("load", () => broadcast({ cmd: "settings", settings: loadSettings() }));
-    setInterval(() => broadcast({ cmd: "settings", settings: loadSettings() }), 2000);
-
-    const mount = () => {
-      if (!document.body) return void requestAnimationFrame(mount);
-      buildPanel();
-    };
+    session.init();
+    // Frames load at different times; keep them in step.
+    setInterval(() => session.sync(), 1500);
+    listen(window, "load", () => session.sync());
+    const mount = () => (document.body ? buildPanel() : requestAnimationFrame(mount));
     mount();
+    session.sync();
   }
+
+  const fmt = (n, digits = 0) => (Number.isFinite(n) ? n.toFixed(digits) : "–");
+  const average = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
+  function timeAgo(ts) {
+    const s = Math.round((Date.now() - ts) / 1000);
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+  }
+
+  const PANEL_CSS = `
+    :host { all: initial; }
+    * { box-sizing: border-box; }
+    .box {
+      --bg: #141b33; --bg2: #1c2547; --line: #2b3762; --text: #e8edff; --sub: #8e9cc9;
+      --accent: #f5a623; --good: #3ddc84; --bad: #ff5c6c;
+      position: fixed; display: flex; flex-direction: column;
+      min-width: 250px; max-width: 520px; min-height: 44px;
+      background: var(--bg); color: var(--text);
+      border: 1px solid var(--line); border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, .45);
+      font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      overflow: hidden; resize: both;
+      opacity: var(--idle-opacity, 1); transition: opacity .15s;
+    }
+    .box:hover, .box.running { opacity: 1; }
+    .box.collapsed { resize: none; height: auto !important; min-height: 0; }
+    header {
+      display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+      background: linear-gradient(90deg, #212c57, #1a2346); cursor: grab; user-select: none;
+      touch-action: none; flex: none;
+    }
+    header:active { cursor: grabbing; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #5d6a94; flex: none; }
+    .running .dot { background: var(--good); box-shadow: 0 0 0 3px rgba(61, 220, 132, .2); }
+    .title { font-weight: 700; letter-spacing: .2px; flex: 1; white-space: nowrap; }
+    .title small { color: var(--sub); font-weight: 500; margin-left: 6px; }
+    .icon { all: unset; cursor: pointer; color: var(--sub); padding: 2px 6px; border-radius: 6px; font-size: 14px; }
+    .icon:hover { color: var(--text); background: rgba(255, 255, 255, .08); }
+    .main { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+    .collapsed .main { display: none; }
+    .live { padding: 10px 12px 8px; border-bottom: 1px solid var(--line); flex: none; }
+    .status { color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .running .status { color: var(--text); }
+    .bar { height: 6px; margin: 8px 0 6px; background: var(--bg2); border-radius: 99px; overflow: hidden; }
+    .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #ffd36b); transition: width .2s; }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .chip { background: var(--bg2); border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; font-size: 11.5px; color: var(--sub); }
+    .chip b { color: var(--text); font-weight: 600; }
+    nav { display: flex; gap: 4px; padding: 8px 12px 0; flex: none; }
+    nav button { all: unset; cursor: pointer; padding: 5px 10px; border-radius: 8px 8px 0 0; color: var(--sub); font-weight: 600; font-size: 12px; }
+    nav button.on { color: var(--text); background: var(--bg2); }
+    .tabs { flex: 1; min-height: 0; overflow: auto; background: var(--bg2); margin: 0 8px 8px; border-radius: 0 10px 10px 10px; }
+    section { display: none; padding: 12px; gap: 12px; flex-direction: column; }
+    section.on { display: flex; }
+    .field > .lbl { display: flex; justify-content: space-between; color: var(--sub); margin-bottom: 4px; font-size: 12px; }
+    .field > .lbl b { color: var(--text); font-weight: 600; }
+    .row { display: flex; align-items: center; gap: 8px; }
+    input[type=range] { flex: 1; min-width: 60px; accent-color: var(--accent); margin: 0; }
+    input[type=number] {
+      width: 58px; padding: 4px 6px; border-radius: 7px; border: 1px solid var(--line);
+      background: var(--bg); color: var(--text); font: inherit; text-align: right;
+    }
+    input[type=number]:focus { outline: none; border-color: var(--accent); }
+    .range2 { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 6px; }
+    .range2 span { color: var(--sub); }
+    .range2 input[type=number] { width: 100%; }
+    .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .hint { color: var(--sub); font-size: 11px; margin-top: 3px; }
+    .go {
+      all: unset; text-align: center; cursor: pointer; padding: 10px; border-radius: 10px;
+      background: var(--accent); color: #1a1f33; font-weight: 800; letter-spacing: .3px; flex: none;
+      margin: 0 8px 8px;
+    }
+    .go:hover { filter: brightness(1.08); }
+    .running .go { background: var(--bad); color: #fff; }
+    .foot { color: var(--sub); font-size: 11px; text-align: center; padding: 0 8px 10px; flex: none; }
+    .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .card { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+    .card .k { color: var(--sub); font-size: 11px; }
+    .card .v { font-size: 18px; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+    th { text-align: right; color: var(--sub); font-weight: 600; padding: 3px 4px; border-bottom: 1px solid var(--line); }
+    td { text-align: right; padding: 3px 4px; border-bottom: 1px solid rgba(43, 55, 98, .5); }
+    th:first-child, td:first-child { text-align: left; }
+    .empty { color: var(--sub); text-align: center; padding: 8px; }
+    .btn2 { all: unset; cursor: pointer; text-align: center; padding: 7px; border-radius: 8px; border: 1px solid var(--line); color: var(--sub); }
+    .btn2:hover { color: var(--text); border-color: var(--sub); }
+  `;
+
+  const PANEL_HTML = `
+    <div class="box">
+      <header>
+        <span class="dot"></span>
+        <span class="title">NT Autotyper<small class="count"></small></span>
+        <button class="icon collapse" title="Collapse">▾</button>
+      </header>
+      <div class="main">
+        <div class="live">
+          <div class="status">Idle</div>
+          <div class="bar"><i></i></div>
+          <div class="chips"></div>
+        </div>
+        <nav>
+          <button data-tab="race" class="on">Race</button>
+          <button data-tab="stats">Stats</button>
+          <button data-tab="panel">Panel</button>
+        </nav>
+        <div class="tabs">
+          <section data-tab="race" class="on">
+            <div class="field">
+              <div class="lbl">Speed range <b class="wpmLabel"></b></div>
+              <div class="range2">
+                <input type="number" data-k="wpmMin" min="10" max="300"><span>to</span><input type="number" data-k="wpmMax" min="10" max="300">
+              </div>
+              <div class="row" style="margin-top:6px"><input type="range" data-k="wpmMin" min="10" max="300"></div>
+              <div class="row"><input type="range" data-k="wpmMax" min="10" max="300"></div>
+              <div class="hint">Each race picks a random speed in this range.</div>
+            </div>
+            <div class="field">
+              <div class="lbl">Accuracy <b><span data-show="accuracy"></span>%</b></div>
+              <div class="row"><input type="range" data-k="accuracy" min="80" max="100" step="0.5"></div>
+            </div>
+            <div class="field">
+              <div class="lbl">Timing variation <b><span data-show="variance"></span>%</b></div>
+              <div class="row"><input type="range" data-k="variance" min="0" max="60"></div>
+            </div>
+            <div class="pair">
+              <div class="field">
+                <div class="lbl">Nitros / race</div>
+                <input type="number" data-k="nitros" min="0" max="10">
+                <div class="hint">Used on the longest words.</div>
+              </div>
+              <div class="field">
+                <div class="lbl">Races to run</div>
+                <input type="number" data-k="races" min="1" max="500">
+                <div class="hint">Clicks "Race Again" in between.</div>
+              </div>
+            </div>
+          </section>
+          <section data-tab="stats">
+            <div class="cards">
+              <div class="card"><div class="k">Races</div><div class="v s-races"></div></div>
+              <div class="card"><div class="k">Avg WPM</div><div class="v s-wpm"></div></div>
+              <div class="card"><div class="k">Avg accuracy</div><div class="v s-acc"></div></div>
+              <div class="card"><div class="k">Best WPM</div><div class="v s-best"></div></div>
+            </div>
+            <table>
+              <thead><tr><th>When</th><th>WPM</th><th>Target</th><th>Acc</th><th>Nitros</th></tr></thead>
+              <tbody class="history"></tbody>
+            </table>
+            <button class="btn2 reset-stats">Reset stats</button>
+          </section>
+          <section data-tab="panel">
+            <div class="field">
+              <div class="lbl">Opacity when not hovered <b><span class="opLabel"></span>%</b></div>
+              <div class="row"><input type="range" class="opacity" min="20" max="100"></div>
+            </div>
+            <div class="hint">Drag the header to move the panel. Drag the bottom-right corner to resize it. Click ▾ to collapse it.</div>
+            <button class="btn2 reset-panel">Reset position and size</button>
+          </section>
+        </div>
+        <button class="go">Start</button>
+        <div class="foot">Alt+Shift+A start/stop · pressing any key stops it</div>
+      </div>
+    </div>`;
 
   function buildPanel() {
     panelHost = document.createElement("div");
-    panelHost.style.cssText = "position:fixed;left:16px;bottom:16px;z-index:2147483647;";
     const root = panelHost.attachShadow({ mode: "open" });
-    root.innerHTML = `
-      <style>
-        :host { all: initial; }
-        .box { width: 250px; font: 13px/1.35 system-ui, sans-serif; color: #e6ecff;
-               background: #1c2541; border: 1px solid #2f3d68; border-radius: 10px;
-               box-shadow: 0 6px 24px rgba(0,0,0,.35); overflow: hidden; }
-        header { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-                 background: #253159; cursor: pointer; user-select: none; }
-        header b { flex: 1; font-size: 13px; }
-        .dot { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
-        .dot.on { background: #4ade80; }
-        .body { padding: 10px; display: grid; gap: 9px; }
-        .collapsed .body { display: none; }
-        .status { color: #9fb0e0; font-size: 12px; min-height: 16px; }
-        label.f { display: grid; grid-template-columns: 1fr 56px; gap: 4px 8px; align-items: center; color: #9fb0e0; }
-        label.f span { grid-column: 1 / -1; }
-        input[type=range] { width: 100%; accent-color: #f5a623; }
-        input[type=number] { width: 56px; box-sizing: border-box; padding: 2px 4px; border-radius: 4px;
-               border: 1px solid #2f3d68; background: #111a33; color: #e6ecff; font: inherit; text-align: right; }
-        .check { display: flex; gap: 6px; align-items: center; color: #c9d4f5; cursor: pointer; }
-        .check input { accent-color: #f5a623; }
-        button { padding: 8px; border: 0; border-radius: 6px; background: #f5a623; color: #1c2541;
-                 font: 700 13px system-ui, sans-serif; cursor: pointer; }
-        button.stop { background: #e5484d; color: #fff; }
-        .hint { color: #6f80b3; font-size: 11px; text-align: center; }
-      </style>
-      <div class="box">
-        <header><span class="dot"></span><b>NT Autotyper</b><span class="chev">▾</span></header>
-        <div class="body">
-          <div class="status">Idle</div>
-          <label class="f"><span>Speed (WPM)</span><input type="range" data-k="wpm" min="10" max="300" step="1"><input type="number" data-k="wpm" min="10" max="300"></label>
-          <label class="f"><span>Accuracy (%)</span><input type="range" data-k="accuracy" min="80" max="100" step="0.5"><input type="number" data-k="accuracy" min="80" max="100" step="0.5"></label>
-          <label class="f"><span>Timing variation (%)</span><input type="range" data-k="variance" min="0" max="60" step="1"><input type="number" data-k="variance" min="0" max="60"></label>
-          <label class="check"><input type="checkbox" data-k="autoStart"> Start automatically each race</label>
-          <button type="button" class="toggle">Start</button>
-          <div class="hint">Alt+Shift+A starts/stops · any key stops</div>
-        </div>
-      </div>`;
+    root.innerHTML = `<style>${PANEL_CSS}</style>${PANEL_HTML}`;
     document.body.appendChild(panelHost);
 
     const $ = (sel) => root.querySelector(sel);
+    const $$ = (sel) => [...root.querySelectorAll(sel)];
     const box = $(".box");
-    const dot = $(".dot");
-    const statusEl = $(".status");
-    const toggleBtn = $(".toggle");
     let settings = loadSettings();
+    const UI_DEFAULTS = { x: 16, y: null, w: 290, h: null, collapsed: false, tab: "race", opacity: 100 };
+    let ui = { ...UI_DEFAULTS, ...readJSON(localStorage, KEYS.ui, {}) };
+    const saveUI = () => writeJSON(localStorage, KEYS.ui, ui);
 
-    const fill = () => {
-      for (const el of root.querySelectorAll("[data-k]")) {
-        const k = el.dataset.k;
-        if (el.type === "checkbox") el.checked = settings[k];
-        else el.value = settings[k];
-      }
-      box.classList.toggle("collapsed", settings.collapsed);
-      $(".chev").textContent = settings.collapsed ? "▸" : "▾";
-    };
-
-    const apply = (partial) => {
-      settings = normalize({ ...settings, ...partial });
-      saveSettings(settings);
-      handleCommand("settings", settings);
-      broadcast({ cmd: "settings", settings });
-    };
-
-    for (const el of root.querySelectorAll("[data-k]")) {
-      el.addEventListener(el.type === "checkbox" ? "change" : "input", () => {
-        const k = el.dataset.k;
-        if (el.type === "checkbox") return apply({ [k]: el.checked });
-        // keep the slider and the number box in step
-        for (const twin of root.querySelectorAll(`[data-k="${k}"]`)) if (twin !== el) twin.value = el.value;
-        if (el.value !== "") apply({ [k]: el.value });
-      });
-      if (el.type === "number") el.addEventListener("change", fill); // snap out-of-range values
+    // ---- position, size, collapse --------------------------------------
+    function place() {
+      const rect = box.getBoundingClientRect();
+      const maxX = Math.max(0, innerWidth - rect.width);
+      const maxY = Math.max(0, innerHeight - Math.min(rect.height, 60));
+      if (ui.y === null) ui.y = innerHeight - rect.height - 16;
+      ui.x = Math.min(maxX, Math.max(0, ui.x));
+      ui.y = Math.min(maxY, Math.max(0, ui.y));
+      box.style.left = `${ui.x}px`;
+      box.style.top = `${ui.y}px`;
+    }
+    function applyLayout() {
+      box.style.width = `${ui.w}px`;
+      box.style.height = ui.h && !ui.collapsed ? `${ui.h}px` : "";
+      box.classList.toggle("collapsed", ui.collapsed);
+      $(".collapse").textContent = ui.collapsed ? "▸" : "▾";
+      box.style.setProperty("--idle-opacity", ui.opacity / 100);
+      $(".opacity").value = ui.opacity;
+      $(".opLabel").textContent = ui.opacity;
+      for (const el of $$("[data-tab]")) el.classList.toggle("on", el.dataset.tab === ui.tab);
+      place();
     }
 
-    $("header").addEventListener("click", () => {
-      apply({ collapsed: !settings.collapsed });
-      fill();
+    let drag = null;
+    $("header").addEventListener("pointerdown", (e) => {
+      if (e.target.closest("button")) return;
+      drag = { dx: e.clientX - ui.x, dy: e.clientY - ui.y };
+      e.currentTarget.setPointerCapture(e.pointerId);
     });
-    toggleBtn.addEventListener("click", () => {
-      sendCommand(panel.anyRunning() ? "stop" : "start");
-      toggleBtn.blur(); // so the next key you press reaches the page
+    $("header").addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      ui.x = e.clientX - drag.dx;
+      ui.y = e.clientY - drag.dy;
+      place();
+    });
+    const endDrag = () => {
+      if (drag) saveUI();
+      drag = null;
+    };
+    $("header").addEventListener("pointerup", endDrag);
+    $("header").addEventListener("pointercancel", endDrag);
+    listen(window, "resize", place);
+
+    new ResizeObserver(() => {
+      if (ui.collapsed) return;
+      const w = Math.round(box.offsetWidth);
+      const h = Math.round(box.offsetHeight);
+      if (w !== ui.w || (ui.h !== null && h !== ui.h) || (ui.h === null && box.style.height)) {
+        ui.w = w;
+        ui.h = box.style.height ? h : ui.h;
+        saveUI();
+      }
+    }).observe(box);
+    // CSS resize sets an inline height once the user drags the corner.
+    new MutationObserver(() => {
+      if (!ui.collapsed && box.style.height) {
+        ui.h = Math.round(box.offsetHeight);
+        saveUI();
+      }
+    }).observe(box, { attributes: true, attributeFilter: ["style"] });
+
+    $(".collapse").addEventListener("click", () => {
+      ui.collapsed = !ui.collapsed;
+      saveUI();
+      applyLayout();
+    });
+    for (const tab of $$("nav button")) {
+      tab.addEventListener("click", () => {
+        ui.tab = tab.dataset.tab;
+        saveUI();
+        applyLayout();
+        panel.render();
+      });
+    }
+    $(".opacity").addEventListener("input", (e) => {
+      ui.opacity = Number(e.target.value);
+      saveUI();
+      applyLayout();
+    });
+    $(".reset-panel").addEventListener("click", () => {
+      ui = { ...UI_DEFAULTS, tab: "panel" };
+      box.style.height = "";
+      saveUI();
+      applyLayout();
     });
 
+    // ---- settings ----------------------------------------------------------
+    function fillSettings() {
+      for (const el of $$("[data-k]")) el.value = settings[el.dataset.k];
+      for (const el of $$("[data-show]")) el.textContent = settings[el.dataset.show];
+      fillSettingsLabel();
+    }
+    function applySetting(key, value, keepOrder) {
+      settings = normalize({ ...settings, [key]: value });
+      // Keep min <= max by pushing the other end (not while typing a number,
+      // where "1" on the way to "120" would drag the other end down).
+      if (keepOrder && key === "wpmMin" && settings.wpmMin > settings.wpmMax) settings.wpmMax = settings.wpmMin;
+      if (keepOrder && key === "wpmMax" && settings.wpmMax < settings.wpmMin) settings.wpmMin = settings.wpmMax;
+      writeJSON(localStorage, KEYS.settings, settings);
+      session.sync();
+    }
+    for (const el of $$("[data-k]")) {
+      el.addEventListener("input", () => {
+        if (el.value === "") return;
+        applySetting(el.dataset.k, el.value, el.type === "range");
+        // Update everything except the box being typed in.
+        for (const other of $$(`[data-k]`)) if (other !== el) other.value = settings[other.dataset.k];
+        for (const show of $$("[data-show]")) show.textContent = settings[show.dataset.show];
+        fillSettingsLabel();
+      });
+      el.addEventListener("change", () => {
+        if (el.value !== "") applySetting(el.dataset.k, el.value, true);
+        fillSettings(); // snap out-of-range values
+      });
+    }
+    function fillSettingsLabel() {
+      const lo = Math.min(settings.wpmMin, settings.wpmMax);
+      const hi = Math.max(settings.wpmMin, settings.wpmMax);
+      $(".wpmLabel").textContent = lo === hi ? `${lo} WPM` : `${lo}–${hi} WPM`;
+    }
+
+    $(".go").addEventListener("click", () => {
+      session.toggle();
+      $(".go").blur(); // so the next key you press reaches the page
+      if (session.state.active) focusRace();
+    });
+    $(".reset-stats").addEventListener("click", () => session.resetStats());
+
+    // ---- rendering ---------------------------------------------------------
     panel.render = () => {
-      const all = [...panel.statuses.values()];
-      const running = all.some((s) => s.running);
-      // Prefer what the frame holding the race says.
-      const shown = all.find((s) => s.running) ?? all.find((s) => s.hasRace) ?? all[all.length - 1];
-      statusEl.textContent = shown?.message ?? "Idle";
-      dot.classList.toggle("on", running);
-      toggleBtn.textContent = running ? "Stop" : "Start";
-      toggleBtn.classList.toggle("stop", running);
+      const active = session.state.active;
+      const statuses = [...panel.statuses.values()].sort((a, b) => a.at - b.at);
+      const live = statuses.filter((s) => s.running).pop() ?? statuses.filter((s) => s.hasRace).pop();
+      const typing = Boolean(live?.running);
+      box.classList.toggle("running", active || typing);
+
+      // Whichever spoke last: the engine typing the race, or the session.
+      $(".status").textContent = live && (typing || live.at > session.messageAt) ? live.message : session.message;
+      $(".go").textContent = active ? "Stop" : "Start";
+      $(".count").textContent = active ? `race ${Math.min(session.state.done + 1, session.state.total)}/${session.state.total}` : "";
+
+      const pct = live?.len ? (100 * live.pos) / live.len : live?.done ? 100 : 0;
+      $(".bar > i").style.width = `${active || typing ? pct : 0}%`;
+      const chips = [];
+      if (live?.target && (active || typing)) chips.push(`target <b>${live.target}</b>`);
+      if (typing && Number.isFinite(live.wpm)) chips.push(`now <b>${fmt(live.wpm)}</b> WPM`);
+      if (typing && live.nitros) chips.push(`nitros <b>${live.nitros}</b>`);
+      if (active) chips.push(`done <b>${session.state.done}</b>/${session.state.total}`);
+      $(".chips").innerHTML = chips.map((c) => `<span class="chip">${c}</span>`).join("");
+
+      if (ui.tab === "stats") renderStats();
     };
 
-    fill();
+    function renderStats() {
+      const st = session.stats;
+      $(".s-races").textContent = st.length;
+      $(".s-wpm").textContent = fmt(average(st.map((r) => r.wpm)));
+      $(".s-acc").textContent = st.length ? `${fmt(average(st.map((r) => r.accuracy)), 1)}%` : "–";
+      $(".s-best").textContent = st.length ? fmt(Math.max(...st.map((r) => r.wpm))) : "–";
+      const rows = st.slice(-25).reverse();
+      $(".history").innerHTML = rows.length
+        ? rows
+            .map(
+              (r) =>
+                `<tr><td>${timeAgo(r.at)}</td><td>${fmt(r.wpm)}</td><td>${r.target ?? "–"}</td><td>${fmt(r.accuracy, 1)}%</td><td>${r.nitros ?? 0}</td></tr>`,
+            )
+            .join("")
+        : `<tr><td colspan="5" class="empty">No races yet</td></tr>`;
+    }
+
+    fillSettings();
+    applyLayout();
     panel.render();
+    setInterval(() => ui.tab === "stats" && renderStats(), 15000); // refresh "x ago"
   }
 })();
