@@ -12,6 +12,16 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
 - **Session stats**: race count, average and best WPM, average accuracy, and a history of recent races (WPM, target, accuracy, nitros). Saved between visits.
 - **Panel**: drag it by the header, resize it from the corner, collapse it with ▾, and make it see-through when you're not hovering. It remembers all of this. It also shows live progress: a progress bar, the target, the current WPM and races done.
 - **Controls**: `Alt+Shift+A` starts and stops it, and pressing any key yourself stops the whole session at once.
+- **Runs in a background tab**: start it, switch to another tab, and it keeps typing at full speed. The tab title shows progress (`▶ 2/5 · …`), then `✓ Done: 5 races · …` when it's finished.
+
+## Running in the background
+
+Start a session, then switch to another tab or window. It keeps going: all of its timing runs in a Web Worker, which Chrome doesn't slow down the way it slows down background tabs. Watch the tab title for progress.
+
+- **The tab has to stay open.** A closed tab can't run anything, so it can't type either.
+- **Stop Chrome from putting the tab to sleep.** Go to `chrome://settings/performance` → Memory Saver → **Always keep these sites active** → add `nitrotype.com`. Otherwise Chrome may discard the tab after a while in the background.
+- Don't minimise the whole browser for long periods. Some systems pause minimised windows harder than background tabs.
+- If Nitro Type blocks Web Workers, the script falls back to normal timers. A background tab then gets slowed down, so keep it visible.
 
 ## Install
 
@@ -32,8 +42,9 @@ To update, paste the new version over the old one in the Tampermonkey editor. Yo
 1. **Trusted events.** Nitro Type ignores keyboard and mouse events made by scripts (`event.isTrusted` is `false`). The script runs before Nitro Type's code (`@run-at document-start`, `@grant none`) and wraps `addEventListener` and the `on…` properties. When an event came from this script, Nitro Type's listeners see `isTrusted: true`. Your real input and the page's own events are untouched.
 2. **Reading the race.** The text comes from the `.dash-letter` spans. The position comes from their classes (`is-waiting` marks the current letter, `is-correct`/`is-typed` mark finished ones).
 3. **Typing.** Each letter is `keydown` → `keypress` → `input` → `keyup`, with Shift and the old `keyCode`/`charCode` values, like a real keyboard. A nitro is Enter at the start of a word. It re-reads the position before every key, so a missed key is re-sent and it never runs ahead of the page.
-4. **Sessions.** The race count lives in `sessionStorage`, so a reload continues the session but a new tab never starts typing by itself. Settings, stats and panel layout live in `localStorage`.
-5. **Iframes.** If the race is inside an iframe, the script types there, and the panel in the top page controls it with `postMessage`.
+4. **Background timing.** Every delay (between keys, between races, the checks for a new race) uses timers inside a Web Worker, so they aren't throttled when the tab is hidden.
+5. **Sessions.** The race count lives in `sessionStorage`, so a reload continues the session but a new tab never starts typing by itself. Settings, stats and panel layout live in `localStorage`.
+6. **Iframes.** If the race is inside an iframe, the script types there, and the panel in the top page controls it with `postMessage`.
 
 ## Troubleshooting
 
@@ -48,7 +59,7 @@ Bots break Nitro Type's rules. Accounts with bot-like stats get flagged, have th
 
 ## Development
 
-`test/mock-nitrotype.html` is a stand-in race page. It rejects untrusted events, has a countdown, stays on a letter after a mistake, supports nitros on Enter, and shows a "Race Again" button (or none, with `?again=none`). It can listen through `keypress`, `keydown`, `document.onkeypress` or `input` events, and run inside an iframe. The end-to-end test serves it at `https://www.nitrotype.com/race`, injects the userscript at document-start like Tampermonkey, and checks speed, the WPM range, accuracy, nitros, multi-race sessions (button and reload), stats, the shortcut, the safety stop, and dragging and collapsing the panel:
+`test/mock-nitrotype.html` is a stand-in race page. It rejects untrusted events, has a countdown, stays on a letter after a mistake, supports nitros on Enter, and shows a "Race Again" button (or none, with `?again=none`). It can listen through `keypress`, `keydown`, `document.onkeypress` or `input` events, and run inside an iframe. The end-to-end test serves it at `https://www.nitrotype.com/race`, injects the userscript at document-start like Tampermonkey, and checks speed, the WPM range, accuracy, nitros, multi-race sessions (button and reload), stats, a simulated background tab (page timers throttled to 1 second, page hidden), the fallback when workers are blocked, the shortcut, the safety stop, and dragging and collapsing the panel:
 
 ```bash
 npm install

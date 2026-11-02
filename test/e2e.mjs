@@ -22,7 +22,7 @@ function check(name, ok, detail = "") {
 
 const BASE = { wpmMin: 100, wpmMax: 100, accuracy: 100, variance: 25, nitros: 0, races: 1 };
 
-async function open(query, settings, ui) {
+async function open(query, settings, ui, before) {
   const context = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   await context.route("https://www.nitrotype.com/**", (route) =>
     route.fulfill({ contentType: "text/html", body: mock }),
@@ -36,6 +36,7 @@ async function open(query, settings, ui) {
     },
     [settings, ui],
   );
+  if (before) await context.addInitScript(before);
   await context.addInitScript({ content: script });
   const page = await context.newPage();
   await page.goto(`https://www.nitrotype.com/race${query}`);
@@ -69,7 +70,8 @@ async function test(name, fn) {
   }
 }
 
-function checkRace(name, r, { wpm, accuracy, accTol = 3 }) {
+// One race is only ~160 letters, so typo counts swing by a few either way.
+function checkRace(name, r, { wpm, accuracy, accTol = 4.5 }) {
   check(`${name}: no events rejected as untrusted`, r.untrusted === 0, `untrusted ${r.untrusted}`);
   check(`${name}: speed within 10% of ${wpm}`, Math.abs(r.wpm - wpm) / wpm <= 0.1, `got ${r.wpm.toFixed(1)}`);
   check(`${name}: accuracy near ${accuracy}%`, Math.abs(r.accuracy - accuracy) <= accTol, `got ${r.accuracy.toFixed(1)}%, wrong ${r.wrong}`);
@@ -154,6 +156,44 @@ try {
     check(`${name}: nitro used`, rs.every((r) => r.nitroWords.length === 1));
     await page.waitForTimeout(1000);
     check(`${name}: panel shows done`, (await status(page)) === "Done: 2 races", await status(page));
+    await context.close();
+  });
+
+  // What Chrome does to a tab you're not looking at: page timers fire at most
+  // about once a second, and the page reports itself hidden.
+  function simulateBackgroundTab() {
+    const realSetTimeout = window.setTimeout;
+    const realSetInterval = window.setInterval;
+    window.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, Math.max(1000, ms || 0), ...args);
+    window.setInterval = (fn, ms, ...args) => realSetInterval(fn, Math.max(1000, ms || 0), ...args);
+    Object.defineProperty(document, "hidden", { get: () => true });
+    Object.defineProperty(document, "visibilityState", { get: () => "hidden" });
+  }
+
+  await test("background tab (throttled page timers)", async (name) => {
+    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, accuracy: 97, races: 2, nitros: 0 }, null, simulateBackgroundTab);
+    await page.evaluate(() => {
+      document.title = "Nitro Type";
+    });
+    await page.locator(".go").click();
+    await page.waitForTimeout(2500);
+    check(`${name}: tab title shows progress`, (await page.title()).startsWith("▶ 0/2 · "), await page.title());
+    const rs = await waitForResults(page, 2, 60000);
+    for (const r of rs) checkRace(name, r, { wpm: 120, accuracy: 97 });
+    await page.waitForTimeout(1500);
+    check(`${name}: title says done`, (await page.title()) === "✓ Done: 2 races · Nitro Type", await page.title());
+    await context.close();
+  });
+
+  await test("workers blocked: falls back to normal timers", async (name) => {
+    const { context, page } = await open("", { ...BASE, wpmMin: 130, wpmMax: 130 }, null, () => {
+      window.Worker = function () {
+        throw new Error("blocked by CSP");
+      };
+    });
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    checkRace(name, r, { wpm: 130, accuracy: 100, accTol: 0 });
     await context.close();
   });
 

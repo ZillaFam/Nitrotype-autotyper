@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      2.0.0
+// @version      2.1.0
 // @description  Types Nitro Type races for you: a WPM range, target accuracy, human-like rhythm and typos, nitros on the longest words, and multi-race sessions with stats.
 // @match        https://www.nitrotype.com/*
 // @match        https://nitrotype.com/*
@@ -114,6 +114,79 @@
 
   // Our own listeners use the native method so they see the real isTrusted.
   const listen = (target, type, fn, opts) => nativeAdd.call(target, type, fn, opts);
+
+  // =========================================================================
+  // 1b. Timers that keep full speed in a background tab
+  // =========================================================================
+  //
+  // Chrome slows setTimeout in tabs you're not looking at (to about once a
+  // second, and once a minute after a while), which would wreck the WPM and
+  // stall sessions. Timers inside a Web Worker aren't throttled like that, so
+  // all of the script's timing runs through one. If the page blocks workers,
+  // it falls back to normal timers (then keep the tab visible).
+
+  const timers = (() => {
+    const pending = new Map(); // id -> { fn, due, native }
+    let nextId = 1;
+    let worker = null;
+
+    const fire = (id) => {
+      const t = pending.get(id);
+      if (!t) return;
+      pending.delete(id);
+      t.fn();
+    };
+    const useNativeTimers = () => {
+      if (!worker) return;
+      worker = null;
+      LOG("worker timers unavailable; background tabs will be throttled");
+      for (const [id, t] of pending) {
+        if (!t.native) t.native = window.setTimeout(() => fire(id), t.due - performance.now());
+      }
+    };
+
+    try {
+      const src = `const t = new Map();
+        onmessage = (e) => {
+          const [op, id, ms] = e.data;
+          if (op === "set") t.set(id, setTimeout(() => { t.delete(id); postMessage(id); }, ms));
+          else { clearTimeout(t.get(id)); t.delete(id); }
+        };`;
+      worker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+      worker.onmessage = (e) => fire(e.data);
+      worker.onerror = useNativeTimers;
+    } catch {
+      worker = null;
+    }
+
+    return {
+      get usingWorker() {
+        return worker !== null;
+      },
+      set(fn, ms = 0) {
+        const id = nextId++;
+        const t = { fn, due: performance.now() + ms, native: 0 };
+        pending.set(id, t);
+        if (worker) worker.postMessage(["set", id, Math.max(0, ms)]);
+        else t.native = window.setTimeout(() => fire(id), ms);
+        return id;
+      },
+      clear(id) {
+        const t = pending.get(id);
+        if (!t) return;
+        pending.delete(id);
+        if (t.native) window.clearTimeout(t.native);
+        else worker?.postMessage(["clear", id]);
+      },
+      every(fn, ms) {
+        const loop = () => {
+          timers.set(loop, ms);
+          fn();
+        };
+        timers.set(loop, ms);
+      },
+    };
+  })();
 
   // =========================================================================
   // 2. Keyboard knowledge (US QWERTY)
@@ -255,7 +328,7 @@
       const charCode = ch === "\n" ? 13 : ch.charCodeAt(0);
       if (fireKey(target, "keypress", k, charCode, charCode) && ch !== "\n") insertText(target, ch);
     }
-    setTimeout(() => {
+    timers.set(() => {
       fireKey(target, "keyup", k, k.keyCode, 0);
       if (k.shift) fireKey(target, "keyup", { ...shiftKey, shift: false }, 16, 0);
     }, holdMs);
@@ -367,7 +440,7 @@
   const STALL_MS = 5000;
   const PACE_GAIN = 0.3;
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+  const sleep = (ms) => new Promise((r) => timers.set(r, Math.max(0, ms)));
   const rand = (a, b) => a + Math.random() * (b - a);
   function gaussian() {
     let u = 0;
@@ -592,7 +665,7 @@
     },
   };
 
-  setInterval(() => engine.tick(), 250);
+  timers.every(() => engine.tick(), 250);
 
   // Safety stop and shortcut, in every frame.
   const isShortcut = (e) => e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyA";
@@ -709,6 +782,7 @@
       this.message = message;
       this.messageAt = Date.now();
       panel.render();
+      updateTitle();
     },
     init() {
       this.state = { ...this.state, ...readJSON(sessionStorage, KEYS.session, {}) };
@@ -728,11 +802,13 @@
       this.say("Waiting for a race…");
     },
     stop(message) {
-      clearTimeout(this.fallbackTimer);
-      clearTimeout(this.nextTimer);
+      timers.clear(this.fallbackTimer);
+      timers.clear(this.nextTimer);
       this.state.active = false;
       this.save();
       this.sync();
+      // Leave a mark in the tab title if you weren't watching.
+      if (document.hidden) titleFlash = message.startsWith("Done") ? `✓ ${message}` : `■ ${message}`;
       this.say(message);
     },
     toggle() {
@@ -740,7 +816,7 @@
       else this.start();
     },
     raceStarted() {
-      clearTimeout(this.fallbackTimer);
+      timers.clear(this.fallbackTimer);
     },
     raceDone(result) {
       this.stats.push(result);
@@ -757,13 +833,13 @@
       }
     },
     scheduleNext(delay) {
-      clearTimeout(this.nextTimer);
-      this.nextTimer = setTimeout(() => {
+      timers.clear(this.nextTimer);
+      this.nextTimer = timers.set(() => {
         if (!this.state.active) return;
         toEngines({ cmd: "next" });
         // No new race soon (no button found?): reload the race page.
-        clearTimeout(this.fallbackTimer);
-        this.fallbackTimer = setTimeout(() => this.state.active && toEngines({ cmd: "reload" }), 12000);
+        timers.clear(this.fallbackTimer);
+        this.fallbackTimer = timers.set(() => this.state.active && toEngines({ cmd: "reload" }), 12000);
       }, delay);
     },
     resetStats() {
@@ -772,6 +848,25 @@
       panel.render();
     },
   };
+
+  // Progress in the tab title, so you can follow a background tab:
+  // "▶ 2/5 · Nitro Type", then "✓ Done: 5 races · …" until you look at it.
+  const TITLE_PREFIX = /^[▶✓■] [^·]* · /;
+  let titleFlash = "";
+  function updateTitle() {
+    if (!IS_TOP) return;
+    const base = document.title.replace(TITLE_PREFIX, "");
+    let prefix = "";
+    if (session.state.active) prefix = `▶ ${session.state.done}/${session.state.total} · `;
+    else if (titleFlash) prefix = `${titleFlash} · `;
+    if (document.title !== prefix + base) document.title = prefix + base;
+  }
+  listen(document, "visibilitychange", () => {
+    if (!document.hidden && titleFlash) {
+      titleFlash = "";
+      updateTitle();
+    }
+  });
 
   function topHandle(msg, source) {
     switch (msg.kind) {
@@ -809,10 +904,14 @@
   if (IS_TOP) {
     session.init();
     // Frames load at different times; keep them in step.
-    setInterval(() => session.sync(), 1500);
+    timers.every(() => {
+      session.sync();
+      updateTitle(); // the page may have changed its title
+    }, 1500);
     listen(window, "load", () => session.sync());
-    const mount = () => (document.body ? buildPanel() : requestAnimationFrame(mount));
-    mount();
+    // Not requestAnimationFrame: it never fires in a background tab.
+    if (document.body) buildPanel();
+    else listen(document, "DOMContentLoaded", buildPanel, { once: true });
     session.sync();
   }
 
@@ -1170,6 +1269,6 @@
     fillSettings();
     applyLayout();
     panel.render();
-    setInterval(() => ui.tab === "stats" && renderStats(), 15000); // refresh "x ago"
+    timers.every(() => ui.tab === "stats" && renderStats(), 15000); // refresh "x ago"
   }
 })();
