@@ -1,0 +1,129 @@
+<!doctype html>
+<!--
+  A stand-in for a Nitro Type race, used by test/e2e.mjs.
+  Like the real thing it:
+    - renders the text as .dash-letter spans (spaces as &nbsp;, a flag at the end)
+    - marks the current letter .is-waiting and done letters .is-correct .is-typed
+    - ignores keys during the countdown
+    - ignores events whose isTrusted is false
+    - stays on a letter after a wrong key (no backspace needed)
+  Query params:
+    listen=keypress|keydown|onkeypress|input   which event drives the race
+    countdown=ms                               delay before "GO"
+    frame=1                                    put the race inside an iframe
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mock Nitro Type</title>
+    <style>
+      body { background: #1c2541; color: #8a97c2; font: 22px monospace; padding: 30px; }
+      .dash-letter.is-correct { color: #fff; }
+      .dash-letter.is-incorrect { color: #e5484d; }
+      .dash-letter.is-waiting { background: #f5a623; color: #1c2541; }
+      iframe { width: 900px; height: 300px; border: 1px solid #2f3d68; }
+      .dash-copy-input { position: absolute; opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <script>
+      const params = new URLSearchParams(location.search);
+      if (params.get("frame") === "1") {
+        params.delete("frame");
+        document.write(`<p>Lobby page with the race in an iframe</p><iframe src="${location.pathname}?${params}"></iframe>`);
+      } else {
+        const TEXT =
+          "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs! " +
+          "How vexingly quick daft zebras jump; sphinx of black quartz, judge my vow (42 times).";
+        const listen = params.get("listen") || "keypress";
+        const countdown = Number(params.get("countdown") ?? 1500);
+
+        document.write(`<div class="dash"><div class="dash-copy"></div><input class="dash-copy-input" autocomplete="off"></div><pre id="result"></pre>`);
+        const copy = document.querySelector(".dash-copy");
+        const spans = [];
+        for (const word of TEXT.split(/(?<= )/)) {
+          const w = document.createElement("span");
+          w.className = "dash-word";
+          for (const ch of word) {
+            const s = document.createElement("span");
+            s.className = "dash-letter";
+            s.textContent = ch === " " ? " " : ch;
+            w.appendChild(s);
+            spans.push(s);
+          }
+          copy.appendChild(w);
+        }
+        const flag = document.createElement("span");
+        flag.className = "dash-letter";
+        flag.textContent = "🏁";
+        copy.appendChild(flag);
+
+        let pos = 0;
+        let started = false;
+        let startedAt = 0;
+        let correct = 0;
+        let wrong = 0;
+        let untrusted = 0;
+        let earlyKeys = 0;
+        spans[0].classList.add("is-waiting");
+        setTimeout(() => {
+          started = true;
+          startedAt = performance.now();
+          window.__go = true;
+        }, countdown);
+
+        function type(ch, isTrusted) {
+          if (!isTrusted) return void untrusted++;
+          if (!started) return void earlyKeys++;
+          if (pos >= TEXT.length) return;
+          if (ch === TEXT[pos]) {
+            correct++;
+            spans[pos].className = "dash-letter is-correct is-typed";
+            pos++;
+            if (pos < TEXT.length) spans[pos].classList.add("is-waiting");
+            else finish();
+          } else {
+            wrong++;
+            spans[pos].classList.add("is-incorrect");
+          }
+        }
+
+        function finish() {
+          const minutes = (performance.now() - startedAt) / 60000;
+          window.__result = {
+            wpm: TEXT.length / 5 / minutes,
+            accuracy: (100 * correct) / (correct + wrong),
+            correct,
+            wrong,
+            untrusted,
+            earlyKeys,
+          };
+          document.getElementById("result").textContent = JSON.stringify(window.__result);
+        }
+
+        const input = document.querySelector(".dash-copy-input");
+        input.focus();
+        if (listen === "keypress") document.addEventListener("keypress", (e) => type(e.key, e.isTrusted));
+        if (listen === "keydown") document.addEventListener("keydown", (e) => e.key.length === 1 && type(e.key, e.isTrusted));
+        if (listen === "onkeypress") document.onkeypress = (e) => type(String.fromCharCode(e.charCode), e.isTrusted);
+        if (listen === "input") {
+          input.addEventListener("input", (e) => {
+            type(e.data, e.isTrusted);
+            input.value = "";
+          });
+        }
+
+        // The page's own synthetic events must stay untrusted.
+        const probe = new KeyboardEvent("keypress", { key: "x" });
+        let probeTrusted = null;
+        document.addEventListener("keypress", function check(e) {
+          if (e === probe || e.key === "x") probeTrusted = e.isTrusted;
+          document.removeEventListener("keypress", check);
+        });
+        document.dispatchEvent(probe);
+        window.__pageEventTrusted = probeTrusted;
+        untrusted = 0; // don't count the probe
+      }
+    </script>
+  </body>
+</html>

@@ -1,8 +1,8 @@
 {
-  "name": "monkeytype-autotyper",
-  "version": "0.1.0",
+  "name": "nitrotype-autotyper",
+  "version": "1.0.0",
   "private": true,
-  "description": "Chrome extension that autotypes Monkeytype tests at a set WPM and accuracy.",
+  "description": "Tampermonkey userscript that autotypes Nitro Type races at a set WPM and accuracy.",
   "type": "module",
   "scripts": {
     "test": "node test/e2e.mjs"
