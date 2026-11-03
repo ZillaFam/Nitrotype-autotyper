@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.1.0
+// @version      3.2.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.1.0";
+  const VERSION = "3.2.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -464,6 +464,96 @@
     };
   }
 
+  // ---- Nitro Type's race state ------------------------------------------
+  //
+  // Nitro Type is a React app. The race component behind #raceContainer keeps
+  // every racer's progress and place in its state; other Nitro Type
+  // userscripts read it the same way. We only read it, never change it.
+
+  function findReact(el) {
+    const key = Object.keys(el).find((k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
+    let fiber = key ? el[key]?.return : null;
+    while (fiber && typeof fiber.type === "string") fiber = fiber.return;
+    return fiber?.stateNode ?? null;
+  }
+
+  function raceComponent() {
+    const el = document.getElementById("raceContainer");
+    if (!el) return null;
+    try {
+      const comp = findReact(el);
+      return comp?.state ? comp : null;
+    } catch {
+      return null;
+    }
+  }
+
+  const nameOf = (r) =>
+    r.profile?.displayName || r.displayName || r.profile?.username || r.username || r.name || (r.robot ? "Bot" : "Racer");
+
+  /** Every racer as { name, me, pct, wpm, acc, place, done }, or null without race state. */
+  function readRacers() {
+    const comp = raceComponent();
+    const racers = comp?.state?.racers;
+    if (!Array.isArray(racers) || !racers.length) return null;
+    const myId = comp.props?.user?.userID;
+    const len = (comp.state.lessonContent || "").length || readRace()?.text.length || 1;
+    return racers
+      .filter((r) => r && !r.disqualified)
+      .map((r) => {
+        const p = r.progress || {};
+        const typed = p.typed || 0;
+        const net = typed - (p.skipped || 0);
+        const done = p.completeStamp > 0;
+        const ms = (done ? p.completeStamp : Date.now()) - p.startStamp;
+        return {
+          name: String(nameOf(r)),
+          me: myId !== undefined && r.userID === myId,
+          pct: Math.max(0, Math.min(1, typed / len)),
+          wpm: p.startStamp > 0 && ms > 1500 && net > 0 ? Math.round(net / 5 / (ms / 60000)) : undefined,
+          acc: done && net > 0 && Number.isFinite(p.errors) ? Math.round((1 - p.errors / net) * 1000) / 10 : undefined,
+          place: Number.isFinite(r.place) ? r.place : undefined,
+          done,
+        };
+      });
+  }
+
+  /** Your official result from the race state, once you've crossed the line. */
+  function officialFromState() {
+    const me = readRacers()?.find((r) => r.me);
+    return me?.done && me.wpm ? { wpm: me.wpm, accuracy: me.acc, place: me.place } : null;
+  }
+
+  /**
+   * Nitro Type's results screen: everyone's rows in the results table (yours
+   * is .is-self), and the rewards box with money and XP. Null if not shown.
+   */
+  function readResultsScreen() {
+    const root = document.querySelector(".race-results, .raceResults");
+    if (!root) return null;
+    const rows = [...root.querySelectorAll(".gridTable-row")];
+    const racers = rows.map((row, i) => {
+      const parsed = parseResults(textOf(row));
+      const cells = [...row.querySelectorAll(".gridTable-cell")].map(textOf);
+      const name = cells.find((c) => /[a-z]/i.test(c) && !/wpm|%|^\d+\s?(st|nd|rd|th)$/i.test(c)) ?? `Racer ${i + 1}`;
+      const me = row.classList.contains("is-self");
+      return { name, me, pct: 1, wpm: parsed.wpm, acc: parsed.accuracy, place: parsed.place ?? i + 1, done: true };
+    });
+    const self = racers.find((r) => r.me);
+    const rewardsEl = root.querySelector(".raceResults-rewards");
+    const rewards = rewardsEl ? parseResults(textOf(rewardsEl)) : {};
+    // No table (a different layout): read the whole results box instead.
+    const whole = rows.length ? {} : parseResults(textOf(root));
+    return {
+      wpm: self?.wpm ?? whole.wpm,
+      accuracy: self?.acc ?? whole.accuracy,
+      place: self?.place ?? whole.place,
+      money: rewards.money ?? whole.money,
+      xp: rewards.xp ?? whole.xp,
+      racers: racers.length ? racers : null,
+    };
+  }
+
   /**
    * Nitro Type's "Currently in a Race" popup: you left a race before it ended
    * and have to wait until it disqualifies you. Returns its "Try Again"
@@ -745,7 +835,7 @@
         if (now - this.lastLiveAt > 250) {
           this.lastLiveAt = now;
           const liveWpm = (pos - skipped) / 5 / ((now - startedAt) / 60000);
-          this.status("Typing…", { target, pos, len: text.length, wpm: liveWpm, nitros: nitrosUsed });
+          this.status("Typing…", { target, pos, len: text.length, wpm: liveWpm, nitros: nitrosUsed, racers: readRacers() });
         }
 
         // Nitro at the start of one of the longest words.
@@ -811,10 +901,11 @@
 
     // ---- Nitro Type's own results ------------------------------------------
     //
-    // After the finish line Nitro Type shows its official WPM, accuracy,
-    // place, money and XP. We don't know its exact markup, so we look for a
-    // small block of text that mentions both "WPM" and accuracy and wasn't
-    // on screen before the race (so a "your average WPM" widget doesn't count).
+    // After the finish line: your official WPM, accuracy and place from the
+    // race state; money and XP (and everyone's rows) from the results screen.
+    // If neither exists, fall back to a small block of new text that mentions
+    // WPM exactly once (so a table of every racer, or a "your average WPM"
+    // widget that was there before the race, doesn't count).
     watchResults: {
       before: new Set(),
       found: null,
@@ -825,17 +916,40 @@
       start(raceAt) {
         const startedAt = Date.now();
         const poll = () => {
-          const fresh = resultCandidates().filter((c) => !this.before.has(c.text));
-          const official = fresh.map((c) => ({ ...parseResults(c.text), text: c.text })).find((r) => r.wpm);
-          if (official) {
-            this.found = official;
-            LOG("Nitro Type results:", official);
-            toTop({ kind: "raceResult", at: raceAt, official });
-          } else if (Date.now() - startedAt < 10000) {
-            timers.set(poll, 400);
-          } else {
-            this.found = { notFound: true };
+          const elapsed = Date.now() - startedAt;
+          const state = officialFromState();
+          const screen = readResultsScreen();
+          let text = null;
+          if (!screen) {
+            text =
+              resultCandidates()
+                .filter((c) => !this.before.has(c.text) && (c.text.match(/wpm/gi) || []).length === 1)
+                .map((c) => parseResults(c.text))
+                .find((r) => r.wpm) ?? null;
           }
+          // Wait for the results screen (money, XP) unless it's slow to show.
+          const ready = (screen && (screen.wpm || state)) || (state && elapsed > 4000) || (text && elapsed > 1500) || elapsed > 10000;
+          if (!ready) {
+            timers.set(poll, 400);
+            return;
+          }
+          const pick = (k) => state?.[k] ?? screen?.[k] ?? text?.[k];
+          const official = {
+            wpm: pick("wpm"),
+            accuracy: pick("accuracy"),
+            place: pick("place"),
+            money: screen?.money ?? text?.money,
+            xp: screen?.xp ?? text?.xp,
+            racers: readRacers() ?? screen?.racers ?? null,
+            source: state ? "race state" : screen ? "results screen" : "page text",
+          };
+          if (!official.wpm) {
+            this.found = { notFound: true };
+            return;
+          }
+          this.found = official;
+          LOG("Nitro Type results:", official);
+          toTop({ kind: "raceResult", at: raceAt, official });
         };
         timers.set(poll, 300);
       },
@@ -858,7 +972,8 @@
         nitros: d.sent === undefined ? "-" : `${d.nitrosUsed} used / ${d.nitrosTried} tried`,
         typingInto: `${target.tagName.toLowerCase()}${target.className && typeof target.className === "string" ? "." + target.className.trim().split(/\s+/).join(".") : ""}`,
         raceAgain: findRaceAgainButton()?.textContent.trim() || "no button found",
-        results: !found ? "-" : found.notFound ? "not found on screen" : `${found.wpm} WPM, ${found.accuracy ?? "?"}%, place ${found.place ?? "?"}, $${found.money ?? "?"}, ${found.xp ?? "?"} XP`,
+        raceState: raceComponent() ? `found, ${readRacers()?.length ?? 0} racers` : "not found (#raceContainer)",
+        results: !found ? "-" : found.notFound ? "not found" : `${found.wpm} WPM, ${found.accuracy ?? "?"}%, place ${found.place ?? "?"}, $${found.money ?? "?"}, ${found.xp ?? "?"} XP (from ${found.source})`,
         timers: timers.usingWorker ? "worker (full speed in background)" : "page timers (slowed in background)",
       };
     },
@@ -1128,7 +1243,14 @@
     attachOfficial(at, official) {
       const race = this.stats.find((r) => r.at === at);
       if (!race) return;
-      race.official = { wpm: official.wpm, accuracy: official.accuracy, place: official.place, money: official.money, xp: official.xp };
+      race.official = {
+        wpm: official.wpm,
+        accuracy: official.accuracy,
+        place: official.place,
+        money: official.money,
+        xp: official.xp,
+        racers: official.racers?.slice(0, 8).map((r) => ({ name: String(r.name).slice(0, 40), me: r.me, wpm: r.wpm, place: r.place, done: r.done, pct: r.pct })),
+      };
       writeJSON(localStorage, KEYS.stats, this.stats);
       panel.render();
     },
@@ -1279,7 +1401,7 @@
       --bg: #141b33; --bg2: #1c2547; --line: #2b3762; --text: #e8edff; --sub: #8e9cc9;
       --accent: #f5a623; --good: #3ddc84; --bad: #ff5c6c;
       position: fixed; z-index: 1; display: flex; flex-direction: column;
-      min-width: 250px; max-width: 520px; min-height: 44px;
+      min-width: 250px; max-width: 520px; min-height: 44px; max-height: calc(100vh - 16px);
       background: var(--bg); color: var(--text);
       border: 1px solid var(--line); border-radius: 14px;
       box-shadow: 0 12px 40px rgba(0, 0, 0, .45);
@@ -1333,6 +1455,47 @@
     }
     .track .car svg { width: var(--car-w); height: calc(var(--car-w) * 14 / 30); }
     .box:not(.running) .track .car { color: #6b7aa8; }
+    /* other racers: dots riding along the top of the lane */
+    .track .rivals i {
+      position: absolute; top: 3px; width: 7px; height: 7px; border-radius: 50%;
+      background: #8e9cc9; transform: translateX(-50%); box-shadow: 0 0 0 2px #1c2547;
+    }
+    .f-track .rivals i { top: 5px; width: 9px; height: 9px; background: #9aa3bd; box-shadow: 0 0 0 2px #1d2232; }
+    /* standings: position, name, progress, WPM */
+    .people { display: grid; gap: 3px; margin-top: 6px; font-size: 12px; }
+    .people:empty { display: none; }
+    .p-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) 56px 30px; align-items: center; gap: 6px; color: var(--sub); }
+    .p-row.me { color: var(--text); font-weight: 600; }
+    .p-pos, .p-wpm { font-variant-numeric: tabular-nums; }
+    .p-wpm { text-align: right; }
+    .p-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .p-bar { height: 4px; border-radius: 99px; background: var(--line); overflow: hidden; }
+    .p-bar i { display: block; height: 100%; background: #6b7aa8; transition: width .25s linear; }
+    .p-row.me .p-bar i { background: var(--accent); }
+    /* after a race: place badge, your numbers, final standings */
+    .result-card {
+      margin-top: 8px; padding: 10px; border-radius: 10px; background: var(--bg2); border: 1px solid var(--line);
+      display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; align-items: center;
+    }
+    .result-card[hidden] { display: none; }
+    .rc-place {
+      grid-row: span 2; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
+      font-weight: 800; font-size: 14px; background: #34406a; color: var(--text);
+    }
+    .rc-place.p1 { background: #e3b341; color: #2a2108; }
+    .rc-place.p2 { background: #c3cbdb; color: #1f2433; }
+    .rc-place.p3 { background: #c98a5a; color: #2a1608; }
+    .rc-main { font-size: 13px; color: var(--sub); }
+    .rc-main b { font-size: 18px; color: var(--text); }
+    .rc-sub { color: var(--sub); font-size: 12px; }
+    .result-card .people { grid-column: 1 / -1; margin-top: 8px; }
+    .compact .people, .compact .result-card { display: none !important; }
+    .f-people { width: min(440px, 84vw); font-size: 13px; margin: 0 0 16px; text-align: left; }
+    .f-people .p-row { grid-template-columns: 34px minmax(0, 1fr) 110px 40px; color: #8f98b3; }
+    .f-people .p-row.me { color: #eef0f6; }
+    .f-people .p-bar { background: rgba(255, 255, 255, .07); }
+    .f-people .p-bar i { background: #6f7894; }
+    .f-people .p-row.me .p-bar i { background: #e3b673; }
     .running .track .car { filter: drop-shadow(0 0 4px rgba(245, 166, 35, .45)); }
     .chips { display: flex; gap: 6px; flex-wrap: wrap; }
     .chip { background: var(--bg2); border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; font-size: 11.5px; color: var(--sub); }
@@ -1382,7 +1545,7 @@
     .box.simple { resize: horizontal; height: auto !important; }
     .simple nav, .simple .adv, .simple section { display: none !important; }
     .simple section[data-tab="race"] { display: flex !important; }
-    .simple .tabs { border-radius: 10px; margin-top: 8px; flex: none; }
+    .simple .tabs { border-radius: 10px; margin-top: 8px; flex: 0 1 auto; min-height: 0; overflow: auto; }
     .simple .chips { display: none; }
     /* focus view: full screen and mellow */
     .focus {
@@ -1481,7 +1644,9 @@
       <div class="main">
         <div class="live">
           <div class="status">Idle</div>
-          <div class="track"><div class="trail"></div><div class="finish"></div><div class="car"><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M2.5 10.5V9.4Q3 8 4.4 7.6L6.2 4.8Q7.1 3.5 8.7 3.5H17Q18.8 3.5 20.1 4.8L22.6 7.3H25.6Q27.8 7.6 28 9.6V10.5Z" fill="currentColor"/><path d="M9.2 5H13V7.3H7.8ZM14.4 5H17.2Q18 5 18.6 5.6L20.1 7.3H14.4Z" fill="#0f1426" opacity=".55"/><circle cx="8.3" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/><circle cx="22" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/></svg></div></div>
+          <div class="track"><div class="trail"></div><div class="finish"></div><div class="rivals"></div><div class="car"><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M2.5 10.5V9.4Q3 8 4.4 7.6L6.2 4.8Q7.1 3.5 8.7 3.5H17Q18.8 3.5 20.1 4.8L22.6 7.3H25.6Q27.8 7.6 28 9.6V10.5Z" fill="currentColor"/><path d="M9.2 5H13V7.3H7.8ZM14.4 5H17.2Q18 5 18.6 5.6L20.1 7.3H14.4Z" fill="#0f1426" opacity=".55"/><circle cx="8.3" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/><circle cx="22" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/></svg></div></div>
+          <div class="people live-people"></div>
+          <div class="result-card" hidden></div>
           <div class="chips"></div>
           <pre class="debug"></pre>
         </div>
@@ -1586,7 +1751,8 @@
         <div class="f-status">Idle</div>
         <div class="f-wpm"><span class="f-num">–</span><span class="f-unit">wpm</span></div>
         <div class="f-sub"></div>
-        <div class="track f-track"><div class="trail"></div><div class="finish"></div><div class="car"><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M2.5 10.5V9.4Q3 8 4.4 7.6L6.2 4.8Q7.1 3.5 8.7 3.5H17Q18.8 3.5 20.1 4.8L22.6 7.3H25.6Q27.8 7.6 28 9.6V10.5Z" fill="currentColor"/><path d="M9.2 5H13V7.3H7.8ZM14.4 5H17.2Q18 5 18.6 5.6L20.1 7.3H14.4Z" fill="#0f1426" opacity=".55"/><circle cx="8.3" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/><circle cx="22" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/></svg></div></div>
+        <div class="track f-track"><div class="trail"></div><div class="finish"></div><div class="rivals"></div><div class="car"><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M2.5 10.5V9.4Q3 8 4.4 7.6L6.2 4.8Q7.1 3.5 8.7 3.5H17Q18.8 3.5 20.1 4.8L22.6 7.3H25.6Q27.8 7.6 28 9.6V10.5Z" fill="currentColor"/><path d="M9.2 5H13V7.3H7.8ZM14.4 5H17.2Q18 5 18.6 5.6L20.1 7.3H14.4Z" fill="#0f1426" opacity=".55"/><circle cx="8.3" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/><circle cx="22" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/></svg></div></div>
+        <div class="people f-people"></div>
         <button class="f-go">Start</button>
       </div>
       <div class="f-hint">Esc or click outside to close · any other key stops typing</div>
@@ -1658,6 +1824,12 @@
     listen(window, "resize", place);
 
     new ResizeObserver(() => {
+      // Grew past the bottom of the window (standings, result card)? Move up.
+      const rect = box.getBoundingClientRect();
+      if (rect.bottom > innerHeight - 8 && ui.y > 0) {
+        ui.y = Math.max(0, innerHeight - rect.height - 8);
+        box.style.top = `${ui.y}px`;
+      }
       if (ui.collapsed || ui.compact || !ui.advanced) {
         // Width can still be changed in these modes; height is automatic.
         if (!ui.collapsed && Math.round(box.offsetWidth) !== ui.w) {
@@ -1851,10 +2023,24 @@
       const progress = active || typing ? pct / 100 : 0;
       for (const track of $$(".track")) track.style.setProperty("--p", progress.toFixed(4));
 
+      // The other racers: dots on the track and live standings while racing;
+      // a result card with final standings afterwards.
+      const liveRacers = typing ? live.racers : null;
+      const dots = (liveRacers ?? [])
+        .filter((r) => !r.me)
+        .map((r) => `<i title="${esc(r.name)}" style="left: calc(4px + (100% - var(--car-w) - 16px) * ${r.pct.toFixed(4)} + var(--car-w) / 2)"></i>`)
+        .join("");
+      for (const el of $$(".rivals")) setHTML(el, dots);
+      setHTML($(".live-people"), liveRacers ? peopleHTML(liveRacers) : "");
+      const last = session.stats[session.stats.length - 1];
+      const showCard = !typing && last && Date.now() - last.at < 30 * 60000;
+      $(".result-card").hidden = !showCard;
+      if (showCard) setHTML($(".result-card"), resultCardHTML(last));
+
       // focus view
       if (!focusEl.hidden) {
-        const last = session.stats[session.stats.length - 1];
         focusEl.classList.toggle("running", active || typing);
+        setHTML($(".f-people"), liveRacers ? peopleHTML(liveRacers) : last?.official?.racers ? peopleHTML(last.official.racers) : "");
         $(".f-status").textContent = $(".status").textContent;
         $(".f-num").textContent = typing && Number.isFinite(live.wpm) ? fmt(live.wpm) : last ? fmt(wpmOf(last)) : "–";
         $(".f-count").textContent = active ? `race ${Math.min(session.state.done + 1, session.state.total)} of ${session.state.total}` : "";
@@ -1875,6 +2061,42 @@
       if (ui.tab === "stats" && !ui.compact) renderStats();
       panel.renderDebug();
     };
+
+    // ---- standings and result card ---------------------------------------------
+    const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+    /** Rows: finishers by place, then everyone else by progress. Top 5, always with you. */
+    function peopleHTML(racers) {
+      if (!racers || racers.length < 2) return "";
+      const rows = [...racers].sort((a, b) =>
+        a.done && b.done ? (a.place ?? 99) - (b.place ?? 99) : a.done ? -1 : b.done ? 1 : b.pct - a.pct,
+      );
+      let shown = rows.slice(0, 5);
+      const me = rows.find((r) => r.me);
+      if (me && !shown.includes(me)) shown = [...shown.slice(0, 4), me];
+      return shown
+        .map((r) => {
+          const pos = r.done && r.place ? ordinal(r.place) : String(rows.indexOf(r) + 1);
+          const pct = Math.round((r.done ? 1 : r.pct) * 100);
+          return `<div class="p-row${r.me ? " me" : ""}"><span class="p-pos">${pos}</span><span class="p-name">${r.me ? "You" : esc(r.name)}</span><span class="p-bar"><i style="width:${pct}%"></i></span><span class="p-wpm">${r.wpm ?? "–"}</span></div>`;
+        })
+        .join("");
+    }
+
+    function resultCardHTML(race) {
+      const o = race.official ?? {};
+      const place = o.place;
+      const badge = place ? `<div class="rc-place p${place}">${ordinal(place)}</div>` : `<div class="rc-place">✓</div>`;
+      const extras = [
+        Number.isFinite(o.money) ? `$${o.money.toLocaleString()}` : "",
+        Number.isFinite(o.xp) ? `+${o.xp.toLocaleString()} XP` : "",
+        race.nitros ? `${race.nitros} nitro${race.nitros === 1 ? "" : "s"}` : "",
+      ].filter(Boolean);
+      return `${badge}
+        <div class="rc-main"><b>${fmt(wpmOf(race))}</b> wpm · ${fmt(accOf(race), 1)}%</div>
+        <div class="rc-sub">${extras.join(" · ") || (race.official ? "Last race" : "Last race (estimated)")}</div>
+        <div class="people rc-people">${peopleHTML(o.racers)}</div>`;
+    }
 
     // ---- debug view --------------------------------------------------------
     function debugText() {

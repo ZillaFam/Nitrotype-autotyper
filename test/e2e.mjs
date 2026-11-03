@@ -146,7 +146,15 @@ try {
     const shown = rs.map((r) => r.shown);
     check(
       `${name}: Nitro Type's own results attached (WPM, place, money, XP)`,
-      stats.every((r, i) => r.official && r.official.wpm === shown[i].wpm && r.official.place === shown[i].place && r.official.money === shown[i].money && r.official.xp === shown[i].xp),
+      stats.every(
+        (r, i) =>
+          r.official &&
+          r.official.wpm === shown[i].wpm &&
+          r.official.accuracy === shown[i].accuracy &&
+          r.official.place === shown[i].place &&
+          r.official.money === shown[i].money &&
+          r.official.xp === shown[i].xp,
+      ),
       JSON.stringify(stats.map((r) => r.official)),
     );
     check(`${name}: header widget (avg WPM) not mistaken for results`, stats.every((r) => r.official?.wpm !== 88));
@@ -160,6 +168,68 @@ try {
     const tip = await page.locator(".chart .tip").textContent();
     check(`${name}: chart tooltip on hover`, (await page.locator(".chart .tip").isVisible()) && /\d+ WPM · [\d.]+% · /.test(tip), tip);
     if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-stats.png") });
+    await context.close();
+  });
+
+  await test("other racers: live standings and the result card", async (name) => {
+    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, races: 1 }, {});
+    await page.locator(".go").click();
+    await page.waitForTimeout(3000);
+    const rows = await page.locator(".live-people .p-row").allTextContents();
+    check(`${name}: live standings list all 4 racers`, rows.length === 4 && rows.some((r) => r.includes("You")) && rows.some((r) => r.includes("Speedy")), rows.join(" | "));
+    check(`${name}: dots for the 3 others on the track`, (await page.locator(".box .rivals i").count()) === 3);
+    check(`${name}: Speedy (160 WPM) leads Slowpoke`, rows.findIndex((r) => r.includes("Speedy")) < rows.findIndex((r) => r.includes("Slowpoke")), rows.join(" | "));
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "people-live.png") });
+
+    await page.locator(".focus-btn").click();
+    check(`${name}: focus view shows standings too`, (await page.locator(".f-people .p-row").count()) === 4);
+    if (shotDir) await page.screenshot({ path: path.join(shotDir, "people-focus.png") });
+    await page.keyboard.press("Escape");
+
+    const [r] = await waitForResults(page, 1);
+    await page.waitForTimeout(2500); // results screen shows ~0.6 s after the finish
+    const card = page.locator(".result-card");
+    const want = r.shown;
+    const suffix = ["st", "nd", "rd"][want.place - 1] ?? "th";
+    check(`${name}: result card after the race`, await card.isVisible());
+    check(`${name}: place badge`, (await card.locator(".rc-place").textContent()) === `${want.place}${suffix}`, await card.locator(".rc-place").textContent());
+    const main = await card.locator(".rc-main").textContent();
+    check(`${name}: your official WPM and accuracy`, main === `${want.wpm} wpm · ${want.accuracy.toFixed(1)}%`, main);
+    const sub = await card.locator(".rc-sub").textContent();
+    check(`${name}: money and XP`, sub.includes(`$${want.money.toLocaleString()}`) && sub.includes(`+${want.xp} XP`), sub);
+    const finals = await card.locator(".p-row").allTextContents();
+    check(`${name}: final standings`, finals.length === 4 && finals.some((x) => x.startsWith(`${want.place}${suffix}You`)), finals.join(" | "));
+    check(`${name}: no live standings after the race`, (await page.locator(".live-people .p-row").count()) === 0);
+    const boxRect = await page.locator(".box").boundingBox();
+    check(`${name}: the whole panel stays on screen`, boxRect.y >= 0 && boxRect.y + boxRect.height <= 800 && (await page.locator(".go").isVisible()), JSON.stringify(boxRect));
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "people-result.png") });
+    await context.close();
+  });
+
+  await test("results without race state: your row, not the winner's", async (name) => {
+    const { context, page } = await open("?state=none&countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, races: 1 });
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    await page.waitForTimeout(3000);
+    const [st] = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-stats")));
+    const o = st.official ?? {};
+    check(
+      `${name}: WPM, accuracy, place, money, XP from the results table`,
+      o.wpm === r.shown.wpm && o.accuracy === r.shown.accuracy && o.place === r.shown.place && o.money === r.shown.money && o.xp === r.shown.xp,
+      JSON.stringify({ got: { ...o, racers: undefined }, want: r.shown }),
+    );
+    check(`${name}: everyone's names from the table`, (o.racers ?? []).map((x) => x.name).join(",") === r.shown.names.join(","), JSON.stringify(o.racers?.map((x) => x.name)));
+    await context.close();
+  });
+
+  await test("results from a plain results box", async (name) => {
+    const { context, page } = await open("?state=none&results=plain&countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, races: 1 });
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    await page.waitForTimeout(3000);
+    const [st] = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-stats")));
+    const o = st.official ?? {};
+    check(`${name}: still finds WPM, place, money, XP`, o.wpm === r.shown.wpm && o.place === r.shown.place && o.money === r.shown.money && o.xp === r.shown.xp, JSON.stringify(o));
     await context.close();
   });
 
