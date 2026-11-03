@@ -197,6 +197,23 @@ try {
     await context.close();
   });
 
+  // Tampermonkey doesn't always inject at document-start; the panel must
+  // still appear (and work) when the script runs after the page has loaded.
+  await test("injected after page load", async (name) => {
+    const context = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+    await context.route("https://www.nitrotype.com/**", (route) => route.fulfill({ contentType: "text/html", body: mock }));
+    await context.addInitScript((s) => localStorage.setItem("nt-autotyper-settings", JSON.stringify(s)), { ...BASE, wpmMin: 120, wpmMax: 120 });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.goto("https://www.nitrotype.com/race?countdown=2500");
+    await page.evaluate(script);
+    check(`${name}: no script errors`, errors.length === 0, errors.join(" | "));
+    check(`${name}: panel shows up`, await page.locator(".go").isVisible());
+    check(`${name}: warns it loaded late`, (await status(page)).startsWith("Loaded late"), await status(page));
+    await context.close();
+  });
+
   await test("controls: stop key, shortcut, drag, collapse", async (name) => {
     const { context, page } = await open("?countdown=300", { ...BASE, wpmMin: 60, wpmMax: 60, races: 3 });
     if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-race.png") });

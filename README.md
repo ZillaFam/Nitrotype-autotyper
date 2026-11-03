@@ -51,6 +51,7 @@ To update, paste the new version over the old one in the Tampermonkey editor. Yo
 - **"Waiting for the race to start…" forever, or "Can't read the race progress".** Nitro Type has probably renamed its letter classes. Inspect a letter in DevTools and update `readRace()` (the console logs `[NT Autotyper] letter classes: …` at verbose level).
 - **Nitros never fire.** The script presses Enter at the start of a word. If Nitro Type changed the nitro key, update the `pressKey("\n")` call in the engine.
 - **It doesn't go to the next race.** It looks for a button labelled "Race Again", "Next Race", "Play Again" or "New Race", and reloads the page if it can't find one within about 12 seconds. If Nitro Type's button says something else, add it to `findRaceAgainButton()`.
+- **Panel says "Loaded late, so it may not type".** Tampermonkey ran the script after the page had loaded, so it couldn't get in ahead of Nitro Type. Tampermonkey Dashboard → Settings → Config mode: Advanced → Experimental → Inject mode: **Instant**, then reload the page.
 - **Nothing types at all.** Tampermonkey settings → Config mode: Advanced → Inject mode should be "Instant" or "Default". If the race is in an iframe on a domain other than `nitrotype.com`, add a `// @match` line for it.
 
 ## Fair use

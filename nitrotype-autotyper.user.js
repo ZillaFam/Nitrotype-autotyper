@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      2.1.0
+// @version      2.1.1
 // @description  Types Nitro Type races for you: a WPM range, target accuracy, human-like rhythm and typos, nitros on the longest words, and multi-race sessions with stats.
 // @match        https://www.nitrotype.com/*
 // @match        https://nitrotype.com/*
@@ -37,6 +37,9 @@
   window.__NT_AUTOTYPER__ = true;
 
   const IS_TOP = window === window.top;
+  // The trusted-key trick only covers listeners added after this script
+  // runs. If the page had already loaded, Nitro Type's are in place.
+  const LOADED_LATE = document.readyState !== "loading";
   const TAG = "nt-autotyper";
   const LOG = (...args) => console.debug("[NT Autotyper]", ...args);
 
@@ -509,7 +512,9 @@
 
       const s = this.settings;
       const text = startRace.text;
-      const target = Math.round(rand(Math.min(s.wpmMin, s.wpmMax), Math.max(s.wpmMin, s.wpmMax) + 0.999));
+      const lo = Math.min(s.wpmMin, s.wpmMax);
+      const hi = Math.max(s.wpmMin, s.wpmMax);
+      const target = Math.min(hi, Math.floor(rand(lo, hi + 1)));
       const rhythm = rhythmFor(text);
       const nitroAt = nitroWordStarts(text, s.nitros);
       LOG("race text:", text);
@@ -785,6 +790,9 @@
       updateTitle();
     },
     init() {
+      if (LOADED_LATE) {
+        this.message = "Loaded late, so it may not type. In Tampermonkey set Inject mode to Instant, then reload.";
+      }
       this.state = { ...this.state, ...readJSON(sessionStorage, KEYS.session, {}) };
       this.stats = readJSON(localStorage, KEYS.stats, []);
     },
@@ -909,11 +917,19 @@
       updateTitle(); // the page may have changed its title
     }, 1500);
     listen(window, "load", () => session.sync());
-    // Not requestAnimationFrame: it never fires in a background tab.
-    if (document.body) buildPanel();
-    else listen(document, "DOMContentLoaded", buildPanel, { once: true });
     session.sync();
   }
+
+  // Pages that enforce Trusted Types reject plain strings for innerHTML.
+  let htmlPolicy = null;
+  try {
+    htmlPolicy = window.trustedTypes?.createPolicy?.("nt-autotyper", { createHTML: (x) => x }) ?? null;
+  } catch {
+    /* policy name not allowed; plain strings it is */
+  }
+  const setHTML = (el, markup) => {
+    el.innerHTML = htmlPolicy ? htmlPolicy.createHTML(markup) : markup;
+  };
 
   const fmt = (n, digits = 0) => (Number.isFinite(n) ? n.toFixed(digits) : "–");
   const average = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
@@ -957,7 +973,7 @@
     .main { display: flex; flex-direction: column; min-height: 0; flex: 1; }
     .collapsed .main { display: none; }
     .live { padding: 10px 12px 8px; border-bottom: 1px solid var(--line); flex: none; }
-    .status { color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .status { color: var(--sub); overflow-wrap: anywhere; }
     .running .status { color: var(--text); }
     .bar { height: 6px; margin: 8px 0 6px; background: var(--bg2); border-radius: 99px; overflow: hidden; }
     .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #ffd36b); transition: width .2s; }
@@ -1085,7 +1101,7 @@
   function buildPanel() {
     panelHost = document.createElement("div");
     const root = panelHost.attachShadow({ mode: "open" });
-    root.innerHTML = `<style>${PANEL_CSS}</style>${PANEL_HTML}`;
+    setHTML(root, `<style>${PANEL_CSS}</style>${PANEL_HTML}`);
     document.body.appendChild(panelHost);
 
     const $ = (sel) => root.querySelector(sel);
@@ -1244,7 +1260,7 @@
       if (typing && Number.isFinite(live.wpm)) chips.push(`now <b>${fmt(live.wpm)}</b> WPM`);
       if (typing && live.nitros) chips.push(`nitros <b>${live.nitros}</b>`);
       if (active) chips.push(`done <b>${session.state.done}</b>/${session.state.total}`);
-      $(".chips").innerHTML = chips.map((c) => `<span class="chip">${c}</span>`).join("");
+      setHTML($(".chips"), chips.map((c) => `<span class="chip">${c}</span>`).join(""));
 
       if (ui.tab === "stats") renderStats();
     };
@@ -1256,19 +1272,26 @@
       $(".s-acc").textContent = st.length ? `${fmt(average(st.map((r) => r.accuracy)), 1)}%` : "–";
       $(".s-best").textContent = st.length ? fmt(Math.max(...st.map((r) => r.wpm))) : "–";
       const rows = st.slice(-25).reverse();
-      $(".history").innerHTML = rows.length
+      setHTML($(".history"), rows.length
         ? rows
             .map(
               (r) =>
                 `<tr><td>${timeAgo(r.at)}</td><td>${fmt(r.wpm)}</td><td>${r.target ?? "–"}</td><td>${fmt(r.accuracy, 1)}%</td><td>${r.nitros ?? 0}</td></tr>`,
             )
             .join("")
-        : `<tr><td colspan="5" class="empty">No races yet</td></tr>`;
+        : `<tr><td colspan="5" class="empty">No races yet</td></tr>`);
     }
 
     fillSettings();
     applyLayout();
     panel.render();
     timers.every(() => ui.tab === "stats" && renderStats(), 15000); // refresh "x ago"
+  }
+
+  // Mount the panel last, once everything above is defined. (Not with
+  // requestAnimationFrame: it never fires in a background tab.)
+  if (IS_TOP) {
+    if (document.body) buildPanel();
+    else listen(document, "DOMContentLoaded", buildPanel, { once: true });
   }
 })();
