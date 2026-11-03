@@ -44,7 +44,8 @@ async function open(query, settings, ui, before) {
   return { context, page };
 }
 
-const raceFrame = (page) => page.frames().find((f) => f !== page.mainFrame()) ?? page.mainFrame();
+// The race's own iframe (in the ?frame=1 layout), not e.g. the reCAPTCHA badge.
+const raceFrame = (page) => page.frames().find((f) => f !== page.mainFrame() && f.url().includes("nitrotype.com/race")) ?? page.mainFrame();
 const results = (page) => raceFrame(page).evaluate(() => window.__results ?? []);
 const status = (page) => page.locator(".status").textContent();
 
@@ -233,6 +234,107 @@ try {
     await context.close();
   });
 
+  await test("captcha: stops and notifies, never touches it", async (name) => {
+    const { context, page } = await open("?captcha=1&countdown=500", { ...BASE, wpmMin: 150, wpmMax: 150, races: 3, notify: true }, null, () => {
+      window.__notes = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+        }
+      };
+    });
+    await page.waitForTimeout(1200);
+    check(`${name}: the always-on reCAPTCHA badge isn't a captcha`, (await page.locator(".go").textContent()) === "Start" && !(await status(page)).includes("Captcha"));
+    await page.locator(".go").click();
+    await page.waitForFunction(() => document.querySelector(".captcha-modal"), null, { timeout: 30000 });
+    await page.waitForTimeout(2000);
+    const typed = () => page.evaluate(() => document.querySelectorAll(".is-typed").length);
+    const t1 = await typed();
+    await page.waitForTimeout(1500);
+    check(`${name}: typing stops`, (await typed()) === t1, `${t1} letters`);
+    check(`${name}: session stopped with a message`, (await status(page)) === "Captcha: solve it yourself, then press Start" && (await page.locator(".go").textContent()) === "Start", await status(page));
+    const notes = await page.evaluate(() => window.__notes);
+    check(`${name}: notification (even with the tab in view)`, notes.length === 1 && notes[0].startsWith("Captcha: session stopped: "), JSON.stringify(notes));
+    check(`${name}: never clicks the captcha`, (await page.evaluate(() => window.__captchaClicks)) === 0);
+    await context.close();
+  });
+
+  await test("notifications: race, level, season, milestone, session", async (name) => {
+    const { context, page } = await open(
+      "?levelup=1&season=1&countdown=500",
+      { ...BASE, wpmMin: 150, wpmMax: 150, accuracy: 97, races: 2, notify: true },
+      null,
+      () => {
+        // A background tab, with five earlier races at 60 WPM (so 150 is a personal best).
+        Object.defineProperty(document, "hidden", { get: () => true });
+        Object.defineProperty(document, "visibilityState", { get: () => "hidden" });
+        window.__notes = [];
+        window.Notification = class {
+          static permission = "granted";
+          static requestPermission = async () => "granted";
+          constructor(title, opts) {
+            window.__notes.push(`${title}: ${opts?.body}`);
+          }
+        };
+        if (!localStorage.getItem("nt-autotyper-stats")) {
+          const old = Array.from({ length: 5 }, (_, i) => ({ wpm: 60, accuracy: 95, at: Date.now() - 86400000 + i, target: 60 }));
+          localStorage.setItem("nt-autotyper-stats", JSON.stringify(old));
+        }
+      },
+    );
+    await page.locator(".go").click();
+    const rs = await waitForResults(page, 2, 60000);
+    await page.waitForTimeout(5000);
+    const notes = await page.evaluate(() => window.__notes);
+    const raceNotes = notes.filter((n) => n.startsWith("Race finished: "));
+    const want = rs[0].shown;
+    const suffix = ["st", "nd", "rd"][want.place - 1] ?? "th";
+    check(
+      `${name}: race note with place, WPM, accuracy, money, XP`,
+      raceNotes.length === 2 && raceNotes[0] === `Race finished: ${want.place}${suffix} · ${want.wpm} WPM · ${want.accuracy.toFixed(1)}% · +$${want.money.toLocaleString()} · +${want.xp} XP`,
+      JSON.stringify(raceNotes),
+    );
+    check(`${name}: level up`, notes.includes(`Level up!: You reached level ${rs[0].shown_level}!`) && notes.includes(`Level up!: You reached level ${rs[1].shown_level}!`), JSON.stringify(notes));
+    check(`${name}: season pass`, notes.includes(`Season pass: Season pass tier ${rs[0].shown_season} unlocked`), JSON.stringify(notes));
+    check(`${name}: personal best`, notes.some((n) => /^Milestone: New personal best: \d+ WPM!$/.test(n)), JSON.stringify(notes));
+    const summary = notes[notes.length - 1];
+    const money = rs.reduce((a, r) => a + r.shown.money, 0);
+    check(`${name}: session summary last, with totals`, summary.startsWith("NT Autotyper session: 2 races · avg ") && summary.includes(`+$${money.toLocaleString()}`) && summary.includes("XP"), summary);
+    await context.close();
+  });
+
+  await test("stop when the screen locks", async (name) => {
+    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 60, wpmMax: 60, races: 3 }, null, () => {
+      // Chrome's Idle Detection, stubbed: the test locks the "screen".
+      window.IdleDetector = class extends EventTarget {
+        static requestPermission = async () => "granted";
+        constructor() {
+          super();
+          this.screenState = "unlocked";
+          this.userState = "active";
+          window.__idle = this;
+        }
+        async start() {}
+      };
+    });
+    await page.locator('nav button[data-tab="panel"]').click();
+    await page.locator('input[data-k="stopOnLock"]').check();
+    await page.waitForTimeout(300);
+    check(`${name}: switch stays on (permission granted)`, await page.locator('input[data-k="stopOnLock"]').isChecked());
+    await page.locator(".go").click();
+    await page.waitForTimeout(1500);
+    check(`${name}: typing`, (await page.locator(".go").textContent()) === "Stop");
+    await page.evaluate(() => {
+      window.__idle.screenState = "locked";
+      window.__idle.dispatchEvent(new Event("change"));
+    });
+    await page.waitForTimeout(500);
+    check(`${name}: screen lock stops the session`, (await status(page)) === "Stopped: your screen locked" && (await page.locator(".go").textContent()) === "Start", await status(page));
+    await context.close();
+  });
+
   await test("long breaks between races", async (name) => {
     const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 200, wpmMax: 200, races: 2, breakEvery: 1, breakLenMin: 0.1, breakLenMax: 0.1 });
     await page.evaluate(() => (document.title = "Nitro Type"));
@@ -347,8 +449,13 @@ try {
     for (const r of rs) checkRace(name, r, { wpm: 120, accuracy: 97 });
     await page.waitForTimeout(1500);
     check(`${name}: title says done`, (await page.title()) === "✓ Done: 2 races · Nitro Type", await page.title());
+    await page.waitForTimeout(2000);
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: desktop notification when done`, notes.length === 1 && notes[0] === "NT Autotyper: Done: 2 races", JSON.stringify(notes));
+    check(
+      `${name}: a note per race, then the session summary`,
+      notes.filter((n) => n.startsWith("Race finished: ")).length === 2 && /^NT Autotyper session: 2 races · avg \d+ WPM/.test(notes[notes.length - 1]),
+      JSON.stringify(notes),
+    );
     await context.close();
   });
 

@@ -11,7 +11,13 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
 - **Multi-race sessions**: set *Races to run*, press Start, and it types every race, clicks "Race Again" after a short random pause, and stops when it's done. If there's no button, it reloads the race page.
 - **Long breaks**: optionally take a 1–3 minute (or whatever you set) break roughly every N races. The count varies a little each time. A countdown shows in the panel and the tab title (`❚❚ 8/20 · …`).
 - **Stats with Nitro Type's own results**: after each race it takes your official WPM, accuracy and place from Nitro Type's race state (the same data other Nitro Type userscripts read), and money and XP from the results screen's rewards box. Without the race state it reads your own row (`.is-self`) in the results table. If it can't find them, it falls back to its own estimate, marked with `~`. Cards for races, average/best WPM, average accuracy, total money and XP; a history table; and a **chart** of WPM per race (hover a point for details). Saved between visits.
-- **Desktop notifications**: get a notification when a session ends, if you're not looking at the tab (turn it on in the Panel tab).
+- **Desktop notifications** (Panel tab, each type has its own switch; only when you're not looking at the tab):
+  - after each race: place, WPM, accuracy, money and XP;
+  - level ups and season-pass rewards (from your level/tier in Nitro Type's race state, or the results screen's "Level Up" / "Reward Unlocked" wording);
+  - milestones: new personal-best WPM, 3 wins in a row, every 5th win;
+  - session done, with totals (races, average WPM and accuracy, wins, money, XP).
+- **Captcha pause**: if Nitro Type asks for a captcha, typing stops, the session ends and you get a notification (even with the tab in view). The script never touches the captcha: you solve it, then press Start. The always-on "protected by reCAPTCHA" badge is ignored.
+- **Stop when the screen locks** (Panel tab): uses Chrome's Idle Detection, which asks for permission once, so a session doesn't keep running when you lock your computer and walk away.
 - **Simple by default**: the panel shows just speed, accuracy, nitros, races to run, the mini track and Start. Flip the **Advanced** switch at the bottom for every other setting plus the Stats and Panel tabs.
 - **Mini track**: a little car drives along a lane to a checkered finish as the race goes on, with a dot for each other racer.
 - **Other racers**: while racing, live standings (position, name, progress, WPM) under the track. After the race, a **result card**: your place badge (gold, silver or bronze), WPM, accuracy, money, XP and nitros, plus the final standings. Both show in the focus view too.

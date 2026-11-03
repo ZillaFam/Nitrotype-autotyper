@@ -19,6 +19,10 @@
     inrace=1                                   first load shows the "Currently in a Race" popup; Try Again starts the race
     results=plain                              a plain results box instead of Nitro Type's results table
     state=none                                 no React fiber on #raceContainer (script must read the results screen)
+    captcha=1                                  a captcha appears mid-race (the race freezes); clicks on it are counted in window.__captchaClicks
+    levelup=1                                  each race levels you up (state + "Level Up!" on the results screen)
+    season=1                                   each race unlocks a season pass tier
+  Every page also has the always-on "protected by reCAPTCHA" badge, which must not count as a captcha.
   Like Nitro Type, #raceContainer's React fiber leads to the race component,
   whose state.racers holds every racer's progress and place. Three bots race
   too: Speedy (160 WPM), Cruiser (105) and Slowpoke (55).
@@ -84,7 +88,10 @@
           { userID: 102, name: "Cruiser", wpm: 105 },
           { userID: 103, name: "Slowpoke", wpm: 55 },
         ];
-        const comp = { state: { racers: [], lessonContent: "" }, props: { user: { userID: ME, loggedIn: true } } };
+        const comp = { state: { racers: [], lessonContent: "" }, props: { user: { userID: ME, loggedIn: true, level: 11, seasonLevel: 4 } } };
+        // The always-on reCAPTCHA v3 badge: not a captcha to solve.
+        document.write(`<iframe class="grecaptcha-badge" src="about:blank#https://www.google.com/recaptcha/api2/anchor?k=x&size=invisible" width="256" height="60" style="position:fixed;right:0;bottom:0;border:0"></iframe>`);
+        window.__captchaClicks = 0;
         window.__comp = comp;
         if (params.get("state") !== "none") {
           raceContainer.__reactFiber$mock = { type: "div", return: { type: "div", return: { type: function RaceContainer() {}, stateNode: comp } } };
@@ -152,6 +159,18 @@
         function moveTo(pos) {
           const r = race;
           me().progress.typed += pos - r.pos;
+          if (params.get("captcha") === "1" && !r.captcha && pos >= 50) {
+            // A captcha takes over: the race freezes until it's solved.
+            r.captcha = true;
+            r.dead = true;
+            document.body.insertAdjacentHTML(
+              "beforeend",
+              `<div class="captcha-modal"><iframe src="about:blank#https://www.google.com/recaptcha/api2/anchor?k=x&size=normal" width="304" height="78"></iframe>
+                 <div class="fake-check" role="checkbox">I'm not a robot</div></div>`,
+            );
+            const box = document.querySelector(".captcha-modal");
+            for (const t of ["pointerdown", "mousedown", "click"]) box.addEventListener(t, () => window.__captchaClicks++, true);
+          }
           for (let i = r.pos; i < pos; i++) r.spans[i].className = "dash-letter is-correct is-typed";
           r.pos = pos;
           if (pos < r.text.length) r.spans[pos].classList.add("is-waiting");
@@ -173,7 +192,7 @@
           const r = race;
           if (!isTrusted) return void untrusted++;
           if (!r.started) return void earlyKeys++;
-          if (r.pos >= r.text.length || r.spans[r.pos]?.isConnected === false) return;
+          if (r.pos >= r.text.length || r.dead || r.spans[r.pos]?.isConnected === false) return;
           if (ch === r.text[r.pos]) {
             r.correct++;
             moveTo(r.pos + 1);
@@ -223,6 +242,18 @@
           const place = self.place;
           const money = 1200 + raceNo;
           const xp = 500 + raceNo;
+          const user = comp.props.user;
+          const extras = [];
+          if (params.get("levelup") === "1") {
+            user.level++;
+            extras.push(`<div class="levelUp">Level Up! You reached level ${user.level}</div>`);
+          }
+          if (params.get("season") === "1") {
+            user.seasonLevel++;
+            extras.push(`<div class="seasonReward">Season Reward Unlocked · Tier ${user.seasonLevel}</div>`);
+          }
+          result.shown_level = user.level;
+          result.shown_season = user.seasonLevel;
           // The results table: finishers by place, then everyone else.
           const rows = comp.state.racers
             .map((x) => {
@@ -260,6 +291,7 @@
                    )
                    .join("")}</div></div>
                  <div class="raceResults-rewards"><div>Money Earned</div><div>$${money.toLocaleString()}</div><div>Experience</div><div>+${xp} XP</div></div>
+                 ${extras.join("")}
                </div>`;
           setTimeout(() => after.prepend(box), 600);
           if (!noAgain) {

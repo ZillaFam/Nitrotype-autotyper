@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.2.0
+// @version      3.3.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.2.0";
+  const VERSION = "3.3.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -555,6 +555,56 @@
   }
 
   /**
+   * Did this race level you up or unlock a season-pass tier? Compares your
+   * level/tier in the race state with before the race, and looks for the
+   * results screen's wording ("Level Up", "Reward Unlocked", ...).
+   */
+  function levelChanges(before = {}) {
+    const after = readProgress();
+    const screen = document.querySelector(".race-results, .raceResults");
+    const text = screen ? textOf(screen) : "";
+    const out = {};
+    if (after.level && before.level && after.level > before.level) out.levelUp = after.level;
+    else if (/level\s*up|new level|reached level/i.test(text)) out.levelUp = Number(text.match(/(?:reached )?level\s*(\d+)/i)?.[1]) || true;
+    if (after.season && before.season && after.season > before.season) out.seasonUp = after.season;
+    else if (/season (?:pass )?reward|reward unlocked|new tier|tier \d+ unlocked/i.test(text)) out.seasonUp = Number(text.match(/tier\s*(\d+)/i)?.[1]) || true;
+    return out;
+  }
+
+  // ---- captcha ---------------------------------------------------------------
+  //
+  // If Nitro Type asks for a captcha, the session stops and tells you. The
+  // script never touches the captcha itself: solving it is up to you.
+  // Ignored: the small "protected by reCAPTCHA" badge (an invisible-size
+  // reCAPTCHA iframe) that some pages always show.
+  const CAPTCHA_FRAME = /recaptcha|hcaptcha|challenges\.cloudflare\.com|turnstile|arkoselabs|funcaptcha/i;
+  const CAPTCHA_TEXT = /i'?m not a robot|verify (?:that )?you(?:'re| are) (?:a )?human|complete the (?:captcha|security check)/i;
+  let captchaCheck = { at: 0, seen: false };
+  function captchaShowing() {
+    const now = Date.now();
+    if (now - captchaCheck.at < 1000) return captchaCheck.seen;
+    let seen = [...document.querySelectorAll("iframe")].some((f) => {
+      const src = f.getAttribute("src") || "";
+      if (!CAPTCHA_FRAME.test(src) || /size=invisible/.test(src)) return false;
+      const r = f.getBoundingClientRect();
+      return r.width > 30 && r.height > 30;
+    });
+    if (!seen && document.body) seen = CAPTCHA_TEXT.test(document.body.innerText);
+    captchaCheck = { at: now, seen };
+    return seen;
+  }
+
+  /** Your level and season-pass tier, if Nitro Type's race state has them. */
+  function readProgress() {
+    const u = raceComponent()?.props?.user ?? {};
+    const num = (...vals) => vals.map(Number).find((n) => Number.isFinite(n) && n > 0);
+    return {
+      level: num(u.level, u.profile?.level),
+      season: num(u.seasonLevel, u.seasonTier, u.racingSeasonLevel, u.season?.level, u.season?.tier),
+    };
+  }
+
+  /**
    * Nitro Type's "Currently in a Race" popup: you left a race before it ended
    * and have to wait until it disqualifies you. Returns its "Try Again"
    * button (or null if the popup has none), or undefined when there's no popup.
@@ -670,6 +720,7 @@
 
     tick() {
       if (!this.armed || this.running || !this.settings) return;
+      if (captchaShowing()) return this.captchaStop();
       const stuck = findStuckPopup();
       if (stuck !== undefined) return this.handleStuck(stuck);
       const race = readRace();
@@ -689,6 +740,19 @@
         this.running = false;
         this.status(`Error: ${err.message}`);
       });
+    },
+
+    // A captcha showed up: stop typing at once and tell the session.
+    captchaStop() {
+      this.runId++;
+      this.running = false;
+      const race = readRace();
+      if (race) {
+        this.lastRace = race;
+        this.lastRaceFinished = isDone(race);
+      }
+      this.status("Captcha on the page");
+      toTop({ kind: "captcha" });
     },
 
     // Wait out the "Currently in a Race" popup, then press its Try Again.
@@ -742,6 +806,7 @@
       LOG("target WPM:", target, "accuracy:", accTarget, "nitro words at:", [...nitroAt]);
       this.dbg = { sent: 0, typos: 0, nitrosTried: 0, nitrosUsed: 0, target, accTarget };
       this.watchResults.snapshot(); // what's on screen before the race
+      this.progressBefore = readProgress(); // level / season tier, to spot a level up
       focusRace();
 
       // Wait for GO: keep trying the first key until Nitro Type takes it.
@@ -749,6 +814,7 @@
       const waitStart = performance.now();
       let race = startRace;
       while (alive()) {
+        if (captchaShowing()) return this.captchaStop();
         const seen = readRace();
         if (!stillHere(seen)) return this.finishRun(id, "Race closed");
         if (!sameRace(seen, startRace)) {
@@ -787,6 +853,7 @@
       while (alive()) {
         await sleep(nextAt - performance.now());
         if (!alive()) return;
+        if (captchaShowing()) return this.captchaStop();
         const seen = readRace();
         if (!stillHere(seen)) return this.finishRun(id, "Race closed");
         if (!sameRace(seen, startRace)) {
@@ -942,6 +1009,7 @@
             xp: screen?.xp ?? text?.xp,
             racers: readRacers() ?? screen?.racers ?? null,
             source: state ? "race state" : screen ? "results screen" : "page text",
+            ...levelChanges(engine.progressBefore),
           };
           if (!official.wpm) {
             this.found = { notFound: true };
@@ -954,6 +1022,8 @@
         timers.set(poll, 300);
       },
     },
+
+    // (see levelChanges below)
 
     // What the debug view shows for this frame.
     debugInfo() {
@@ -973,6 +1043,11 @@
         typingInto: `${target.tagName.toLowerCase()}${target.className && typeof target.className === "string" ? "." + target.className.trim().split(/\s+/).join(".") : ""}`,
         raceAgain: findRaceAgainButton()?.textContent.trim() || "no button found",
         raceState: raceComponent() ? `found, ${readRacers()?.length ?? 0} racers` : "not found (#raceContainer)",
+        progress: (() => {
+          const pr = readProgress();
+          return `level ${pr.level ?? "?"}, season tier ${pr.season ?? "?"}`;
+        })(),
+        captcha: captchaShowing() ? "SHOWING" : "none",
         results: !found ? "-" : found.notFound ? "not found" : `${found.wpm} WPM, ${found.accuracy ?? "?"}%, place ${found.place ?? "?"}, $${found.money ?? "?"}, ${found.xp ?? "?"} XP (from ${found.source})`,
         timers: timers.usingWorker ? "worker (full speed in background)" : "page timers (slowed in background)",
       };
@@ -1085,7 +1160,11 @@
     wpmMin: 80, wpmMax: 95, accMin: 96, accMax: 98, variance: 25, nitros: 1, races: 5,
     breakEvery: 0, breakLenMin: 1, breakLenMax: 3, // long break every ~N races (0 = off), minutes
     notify: false, debug: false,
+    // which notifications (all need "notify" on)
+    notifyRace: true, notifyLevel: true, notifySeason: true, notifySession: true, notifyMilestone: true, notifyCaptcha: true,
+    stopOnLock: false, // stop the session when the computer's screen locks
   };
+  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock"];
   const LIMITS = {
     wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
     nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
@@ -1122,8 +1201,7 @@
     for (const key of ["wpmMin", "wpmMax", "nitros", "races", "variance", "breakEvery"]) s[key] = Math.round(s[key]);
     for (const key of ["accMin", "accMax"]) s[key] = Math.round(s[key] * 2) / 2;
     for (const key of ["breakLenMin", "breakLenMax"]) s[key] = Math.round(s[key] * 10) / 10;
-    s.notify = Boolean(s.notify);
-    s.debug = Boolean(s.debug);
+    for (const key of BOOLEAN_SETTINGS) s[key] = Boolean(s[key]);
     return s;
   }
 
@@ -1173,24 +1251,89 @@
     },
     start() {
       const s = loadSettings();
-      this.state = { active: true, total: s.races, done: 0, sinceBreak: 0, breakAfter: this.pickBreakAfter(s), breakUntil: 0 };
+      this.state = { active: true, total: s.races, done: 0, sinceBreak: 0, breakAfter: this.pickBreakAfter(s), breakUntil: 0, startAt: Date.now() };
       this.save();
       this.sync();
       this.say("Waiting for a race…");
     },
-    stop(message) {
+    stop(message, { silent = false } = {}) {
       timers.clear(this.fallbackTimer);
       timers.clear(this.nextTimer);
+      const wasActive = this.state.active;
       this.state.active = false;
+      this.state.breakUntil = 0;
       this.save();
       this.sync();
-      this.state.breakUntil = 0;
       // Leave a mark in the tab title (and maybe a notification) if you
       // weren't watching.
-      const away = document.hidden || !document.hasFocus();
       if (document.hidden) titleFlash = message.startsWith("Done") ? `✓ ${message}` : `■ ${message}`;
-      if (away && !message.includes("you pressed")) notify(message);
+      if (message.startsWith("Done")) {
+        // The summary waits a moment for the last race's money and XP.
+        timers.clear(this.summaryTimer);
+        this.summaryTimer = timers.set(() => this.sendSummary(), 6000);
+      } else if (!silent && wasActive && !message.includes("you pressed")) {
+        notify("session", message);
+      }
       this.say(message);
+    },
+    sendSummary() {
+      timers.clear(this.summaryTimer);
+      this.summaryTimer = 0;
+      const races = this.stats.filter((r) => r.at >= (this.state.startAt ?? 0));
+      if (!races.length) return;
+      const wpm = average(races.map((r) => r.official?.wpm ?? r.wpm));
+      const acc = average(races.map((r) => r.official?.accuracy ?? r.accuracy));
+      const money = races.reduce((a, r) => a + (r.official?.money ?? 0), 0);
+      const xp = races.reduce((a, r) => a + (r.official?.xp ?? 0), 0);
+      const wins = races.filter((r) => r.official?.place === 1).length;
+      const parts = [
+        `${races.length} race${races.length === 1 ? "" : "s"}`,
+        `avg ${Math.round(wpm)} WPM`,
+        `${acc.toFixed(1)}%`,
+        wins ? `${wins} win${wins === 1 ? "" : "s"}` : "",
+        money ? `+$${money.toLocaleString()}` : "",
+        xp ? `+${xp.toLocaleString()} XP` : "",
+      ];
+      notify("session", parts.filter(Boolean).join(" · "));
+    },
+    // After each race: a note with how it went, plus any level up, season
+    // reward or milestone. Waits for Nitro Type's official numbers, or uses
+    // the script's estimate if they never show up.
+    noteRace(race) {
+      timers.clear(this.raceNoteTimers?.get(race.at));
+      this.raceNoteTimers?.delete(race.at);
+      const o = race.official ?? {};
+      const wpm = Math.round(o.wpm ?? race.wpm);
+      const acc = (o.accuracy ?? race.accuracy).toFixed(1);
+      const parts = [
+        o.place ? ordinalOf(o.place) : "",
+        `${wpm} WPM`,
+        `${acc}%`,
+        Number.isFinite(o.money) ? `+$${o.money.toLocaleString()}` : "",
+        Number.isFinite(o.xp) ? `+${o.xp.toLocaleString()} XP` : "",
+      ];
+      notify("race", parts.filter(Boolean).join(" · "));
+      if (o.levelUp) notify("level", typeof o.levelUp === "number" ? `You reached level ${o.levelUp}!` : "You levelled up!");
+      if (o.seasonUp) notify("season", typeof o.seasonUp === "number" ? `Season pass tier ${o.seasonUp} unlocked` : "New season pass reward unlocked");
+      // Milestones
+      const earlier = this.stats.filter((r) => r !== race);
+      const wpmOf = (r) => r.official?.wpm ?? r.wpm;
+      if (earlier.length >= 5 && wpm > Math.max(...earlier.map(wpmOf))) notify("milestone", `New personal best: ${wpm} WPM!`);
+      if (o.place === 1) {
+        const wins = this.stats.filter((r) => r.official?.place === 1).length;
+        const last3 = this.stats.slice(-3);
+        if (last3.length === 3 && last3.every((r) => r.official?.place === 1)) notify("milestone", "Hat trick: 3 wins in a row!");
+        else if (wins % 5 === 0) notify("milestone", `That's ${wins} wins!`);
+      }
+      // The last race of the session: send the summary now.
+      if (this.summaryTimer && race === this.stats[this.stats.length - 1]) this.sendSummary();
+    },
+    raceNoteTimers: new Map(),
+    captcha() {
+      if (!this.state.active) return;
+      titleFlash = "■ Captcha";
+      this.stop("Captcha: solve it yourself, then press Start", { silent: true });
+      notify("captcha", "Nitro Type is asking for a captcha. The session is stopped; solve it yourself, then press Start.", { always: true });
     },
     toggle() {
       if (this.state.active) this.stop("Stopped");
@@ -1203,6 +1346,8 @@
       this.stats.push(result);
       if (this.stats.length > 300) this.stats.splice(0, this.stats.length - 300);
       writeJSON(localStorage, KEYS.stats, this.stats);
+      // If Nitro Type's own numbers don't arrive, note the race with ours.
+      this.raceNoteTimers.set(result.at, timers.set(() => this.noteRace(result), 11000));
       if (!this.state.active) return panel.render();
       this.state.done++;
       this.state.sinceBreak++;
@@ -1250,9 +1395,12 @@
         money: official.money,
         xp: official.xp,
         racers: official.racers?.slice(0, 8).map((r) => ({ name: String(r.name).slice(0, 40), me: r.me, wpm: r.wpm, place: r.place, done: r.done, pct: r.pct })),
+        levelUp: official.levelUp,
+        seasonUp: official.seasonUp,
       };
       writeJSON(localStorage, KEYS.stats, this.stats);
       panel.render();
+      if (this.raceNoteTimers.has(at)) this.noteRace(race);
     },
     scheduleNext(delay) {
       timers.clear(this.nextTimer);
@@ -1299,15 +1447,56 @@
     }
   });
 
-  // Desktop notification (only if you turned it on and allowed it).
-  function notify(message) {
-    if (!loadSettings().notify || !("Notification" in window) || Notification.permission !== "granted") return;
+  const ordinalOf = (n) => (n % 100 >= 11 && n % 100 <= 13 ? `${n}th` : `${n}${["th", "st", "nd", "rd"][n % 10] ?? "th"}`);
+
+  // Desktop notifications: each type has its own switch, and all need the
+  // main switch on and the browser's permission. Only when you're not
+  // looking at the tab, except the ones marked "always" (captchas).
+  const NOTIFY = {
+    race: { key: "notifyRace", title: "Race finished" },
+    level: { key: "notifyLevel", title: "Level up!" },
+    season: { key: "notifySeason", title: "Season pass" },
+    session: { key: "notifySession", title: "NT Autotyper session" },
+    milestone: { key: "notifyMilestone", title: "Milestone" },
+    captcha: { key: "notifyCaptcha", title: "Captcha: session stopped" },
+  };
+  function notify(type, message, { always = false } = {}) {
+    const s = loadSettings();
+    const kind = NOTIFY[type];
+    if (!kind || !s.notify || !s[kind.key]) return;
+    if (!always && !(document.hidden || !document.hasFocus())) return;
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
     try {
-      new Notification("NT Autotyper", { body: message, tag: "nt-autotyper" });
+      new Notification(kind.title, { body: message, tag: `nt-autotyper-${type}` });
     } catch {
       /* some browsers only allow notifications from a service worker */
     }
   }
+
+  // Stop the session when the computer's screen locks (Chrome's Idle
+  // Detection; it asks for permission once).
+  const lockWatch = {
+    detector: null,
+    async start(askPermission) {
+      if (this.detector) return "on";
+      if (!("IdleDetector" in window)) return "unsupported";
+      try {
+        let state;
+        if (askPermission) state = await IdleDetector.requestPermission();
+        else state = (await navigator.permissions.query({ name: "idle-detection" }).catch(() => ({ state: "prompt" }))).state;
+        if (state !== "granted") return "denied";
+        const detector = new IdleDetector();
+        detector.addEventListener("change", () => {
+          if (detector.screenState === "locked" && session.state.active) session.stop("Stopped: your screen locked");
+        });
+        await detector.start({ threshold: 60000 });
+        this.detector = detector;
+        return "on";
+      } catch {
+        return "denied";
+      }
+    },
+  };
 
   function topHandle(msg, source) {
     switch (msg.kind) {
@@ -1324,6 +1513,9 @@
         break;
       case "raceFailed":
         session.raceFailed(msg.message);
+        break;
+      case "captcha":
+        session.captcha();
         break;
       case "raceResult":
         session.attachOfficial(msg.at, msg.official);
@@ -1367,6 +1559,7 @@
       updateTitle(); // the page may have changed its title
     }, 1500);
     timers.every(() => session.tickBreak(), 1000);
+    if (loadSettings().stopOnLock) lockWatch.start(false);
     // Reloaded in the middle of a break: finish the break, then carry on.
     if (session.onBreak()) session.scheduleNext(session.state.breakUntil - Date.now());
     listen(window, "load", () => session.sync());
@@ -1600,6 +1793,8 @@
     .check { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
     .check input { accent-color: var(--accent); margin: 2px 0 0; }
     .check small { display: block; color: var(--sub); font-size: 11px; }
+    .sub-checks { display: grid; gap: 7px; padding-left: 22px; }
+    .sub-checks.off { opacity: .45; pointer-events: none; }
     .sep { border: 0; border-top: 1px solid var(--line); margin: 0; }
     .breaks { display: grid; grid-template-columns: auto 52px auto; align-items: center; gap: 6px; color: var(--sub); font-size: 12px; }
     .breaks input[type=number] { width: 52px; }
@@ -1727,7 +1922,16 @@
             <div class="hint">Drag the header to move the panel, drag the bottom-right corner to resize it, ⊟ for compact mode, ▾ to collapse it.</div>
             <button class="btn2 reset-panel">Reset position and size</button>
             <hr class="sep">
-            <label class="check"><input type="checkbox" data-k="notify"><span>Desktop notification when a session ends<small class="notify-hint">Only when you're not looking at the tab.</small></span></label>
+            <label class="check"><input type="checkbox" data-k="notify"><span>Desktop notifications<small class="notify-hint">Only when you're not looking at the tab (captchas always).</small></span></label>
+            <div class="sub-checks">
+              <label class="check"><input type="checkbox" data-k="notifyRace"><span>After each race<small>Place, WPM, accuracy, money, XP</small></span></label>
+              <label class="check"><input type="checkbox" data-k="notifyLevel"><span>Level ups</span></label>
+              <label class="check"><input type="checkbox" data-k="notifySeason"><span>Season pass rewards</span></label>
+              <label class="check"><input type="checkbox" data-k="notifyMilestone"><span>Milestones<small>Personal best WPM, win streaks</small></span></label>
+              <label class="check"><input type="checkbox" data-k="notifySession"><span>Session done<small>Totals: races, WPM, wins, money, XP</small></span></label>
+              <label class="check"><input type="checkbox" data-k="notifyCaptcha"><span>Captcha (session stopped)</span></label>
+            </div>
+            <label class="check"><input type="checkbox" data-k="stopOnLock"><span>Stop when my screen locks<small class="lock-hint">Chrome asks for permission once.</small></span></label>
             <label class="check"><input type="checkbox" data-k="debug"><span>Debug view<small>Shows what the script sees on the page. Copy it and send it over if something breaks.</small></span></label>
             <button class="btn2 copy-debug">Copy debug info</button>
             <hr class="sep">
@@ -1931,6 +2135,8 @@
       }
       fillLabels();
     }
+    // The per-type switches only matter with notifications on.
+    const syncSubChecks = () => $(".sub-checks").classList.toggle("off", !settings.notify);
     function fillLabels() {
       const span = (a, b, unit) => {
         const lo = Math.min(a, b);
@@ -1968,7 +2174,18 @@
               $(".notify-hint").textContent = "Notifications are blocked for nitrotype.com. Allow them in the site settings (padlock icon), then try again.";
             }
           }
+          if (key === "stopOnLock" && el.checked) {
+            const result = await lockWatch.start(true);
+            if (result !== "on") {
+              el.checked = false;
+              $(".lock-hint").textContent =
+                result === "unsupported"
+                  ? "Your browser can't tell when the screen locks (needs Chrome or Edge)."
+                  : "Permission denied. Allow it in the site settings (padlock icon), then try again.";
+            }
+          }
           applySetting(key, el.checked);
+          syncSubChecks();
           panel.render();
           panel.renderDebug();
         });
@@ -2235,6 +2452,7 @@
     }
 
     fillSettings();
+    syncSubChecks();
     applyLayout();
     panel.render();
     timers.every(() => ui.tab === "stats" && renderStats(), 15000); // refresh "x ago"
