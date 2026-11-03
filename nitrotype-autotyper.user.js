@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.0.0
+// @version      3.0.1
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.0.0";
+  const VERSION = "3.0.1";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -380,7 +380,12 @@
     return { text, pos, id: spans[0], firstClass: spans[0].className };
   }
 
-  const sameRace = (a, b) => Boolean(a && b && a.id === b.id && a.text === b.text);
+  // Same race = same text. (Not the same <span> elements: Nitro Type may
+  // redraw the letters mid-race, and that must not look like a new race.)
+  const sameRace = (a, b) => Boolean(a && b && a.text === b.text);
+  const isDone = (race) => Boolean(race && race.pos !== null && race.pos >= race.text.length);
+  // How long the race may be missing or different before we believe it's gone.
+  const GONE_MS = 2500;
 
   /** Word start indexes of the `count` longest words (ties: earlier first). */
   function nitroWordStarts(text, count) {
@@ -394,12 +399,23 @@
   }
 
   function findRaceAgainButton() {
-    const candidates = document.querySelectorAll("button, a, [role=button]");
-    for (const el of candidates) {
+    // Score each visible button: on the results screen, and labelled exactly
+    // "Race Again", beats a vaguer label elsewhere. Site menus (nav, header,
+    // footer) are never used: a "New Race" menu link would leave mid-race.
+    const results = document.querySelector(".race-results, .raceResults");
+    let best = null;
+    let bestScore = 0;
+    for (const el of document.querySelectorAll("button, a, [role=button]")) {
+      if (el.closest("nav, header, footer") || !el.getClientRects().length) continue;
       const label = (el.textContent || el.getAttribute("aria-label") || "").trim();
-      if (/race again|next race|play again|new race/i.test(label) && el.getClientRects().length) return el;
+      if (!/race again|next race|play again|new race/i.test(label)) continue;
+      const score = 1 + (/race again/i.test(label) ? 2 : 0) + (results?.contains(el) ? 4 : 0);
+      if (score > bestScore) {
+        best = el;
+        bestScore = score;
+      }
     }
-    return null;
+    return best;
   }
 
   // Visible text of an element, with spaces between separate bits of text.
@@ -446,6 +462,24 @@
       money: toNumber(pick(/\$\s*([\d,]+)/)),
       xp: toNumber(pick(/\+?([\d,]+)\s*XP\b/i, /\bXP\s*:?\s*\+?([\d,]+)/i)),
     };
+  }
+
+  /**
+   * Nitro Type's "Currently in a Race" popup: you left a race before it ended
+   * and have to wait until it disqualifies you. Returns its "Try Again"
+   * button (or null if the popup has none), or undefined when there's no popup.
+   */
+  let stuckCheck = { at: 0, seen: false };
+  function findStuckPopup() {
+    // Visible text only (innerText skips <script> contents, which can contain
+    // the same words), and at most once a second since it's not cheap.
+    const now = Date.now();
+    if (now - stuckCheck.at > 1000) {
+      stuckCheck = { at: now, seen: Boolean(document.body && /currently in a race/i.test(document.body.innerText)) };
+    }
+    if (!stuckCheck.seen) return undefined;
+    const buttons = [...document.querySelectorAll("button, a, [role=button]")];
+    return buttons.find((b) => /try again/i.test(b.textContent) && b.getClientRects().length) ?? null;
   }
 
   // =========================================================================
@@ -512,6 +546,8 @@
     running: false,
     runId: 0,
     lastRace: null, // the race we last typed (or were stopped in)
+    lastRaceFinished: false, // ...and whether we crossed the finish line in it
+    stuckTimer: 0, // pending "Try Again" click on the "Currently in a Race" popup
     lastLiveAt: 0,
 
     status(message, extra = {}) {
@@ -524,7 +560,8 @@
       if (armed) {
         // A fresh start resumes an unfinished race, but skips a finished one.
         const race = readRace();
-        this.lastRace = race && race.pos !== null && race.pos >= race.text.length ? race : null;
+        this.lastRaceFinished = isDone(race);
+        this.lastRace = this.lastRaceFinished ? race : null;
       } else if (this.running) {
         this.abort("Stopped");
       }
@@ -534,17 +571,26 @@
       this.runId++;
       this.running = false;
       const race = readRace();
-      if (race) this.lastRace = race;
+      if (race) {
+        this.lastRace = race;
+        this.lastRaceFinished = isDone(race);
+      }
       this.status(message);
     },
 
     tick() {
       if (!this.armed || this.running || !this.settings) return;
+      const stuck = findStuckPopup();
+      if (stuck !== undefined) return this.handleStuck(stuck);
       const race = readRace();
-      if (!race || sameRace(race, this.lastRace)) return;
-      if (race.pos !== null && race.pos >= race.text.length) {
+      if (!race) return;
+      // A new race: different text, or the same text again after we finished.
+      const fresh = !sameRace(race, this.lastRace) || (this.lastRaceFinished && !isDone(race));
+      if (!fresh) return;
+      if (isDone(race)) {
         // Joined on a results screen: move on to the next race.
         this.lastRace = race;
+        this.lastRaceFinished = true;
         toTop({ kind: "needNext" });
         return;
       }
@@ -555,11 +601,42 @@
       });
     },
 
+    // Wait out the "Currently in a Race" popup, then press its Try Again.
+    handleStuck(tryAgain) {
+      if (this.stuckTimer) return;
+      const wait = rand(20000, 30000);
+      toTop({ kind: "say", message: `Nitro Type says you're still in your last race. Trying again in ${Math.round(wait / 1000)}s…` });
+      toTop({ kind: "raceSeen" }); // nothing to reload: just wait
+      this.stuckTimer = timers.set(() => {
+        this.stuckTimer = 0;
+        const button = findStuckPopup();
+        if (button) {
+          LOG("clicking Try Again");
+          clickElement(button);
+        } else if (button === null && tryAgain === null) {
+          toTop({ kind: "say", message: "Nitro Type says you're still in your last race. Waiting…" });
+        }
+      }, wait);
+    },
+
     async run(startRace) {
       const id = ++this.runId;
       const alive = () => id === this.runId;
       this.running = true;
       this.lastRace = startRace;
+      this.lastRaceFinished = false;
+      toTop({ kind: "raceSeen" }); // a race is on screen: no reload needed
+      // The race can blink out (Nitro Type redrawing it). Only after it's been
+      // gone or different for GONE_MS do we give up on it.
+      let goneSince = 0;
+      const stillHere = (r) => {
+        if (sameRace(r, startRace)) {
+          goneSince = 0;
+          return true;
+        }
+        goneSince ||= performance.now();
+        return performance.now() - goneSince < GONE_MS;
+      };
 
       const s = this.settings;
       const text = startRace.text;
@@ -582,8 +659,13 @@
       const waitStart = performance.now();
       let race = startRace;
       while (alive()) {
-        race = readRace();
-        if (!sameRace(race, startRace)) return this.finishRun(id, "Race closed");
+        const seen = readRace();
+        if (!stillHere(seen)) return this.finishRun(id, "Race closed");
+        if (!sameRace(seen, startRace)) {
+          await sleep(50);
+          continue;
+        }
+        race = seen;
         if (race.pos !== null && race.pos > 0) break;
         if (race.pos === null && race.firstClass !== startRace.firstClass) {
           // Something changed, but not in a way we understand: don't keep
@@ -615,8 +697,13 @@
       while (alive()) {
         await sleep(nextAt - performance.now());
         if (!alive()) return;
-        race = readRace();
-        if (!sameRace(race, startRace)) return this.finishRun(id, "Race closed");
+        const seen = readRace();
+        if (!stillHere(seen)) return this.finishRun(id, "Race closed");
+        if (!sameRace(seen, startRace)) {
+          nextAt = performance.now() + 50; // blinked out: look again shortly
+          continue;
+        }
+        race = seen;
         const now = performance.now();
         const pos = race.pos;
 
@@ -714,6 +801,7 @@
       this.running = false;
       this.status(message, result ? { target: result.target, wpm: result.wpm, done: true } : {});
       if (result) {
+        this.lastRaceFinished = true;
         toTop({ kind: "raceDone", result });
         this.watchResults.start(result.at);
       } else {
@@ -775,9 +863,15 @@
       };
     },
 
-    nextRace() {
+    // Only ever leave a race we finished and that's still showing its
+    // results. Never in the middle of a race, a lobby or a countdown.
+    onResultsScreen() {
       const race = readRace();
-      if (!race) return;
+      return !this.running && this.lastRaceFinished && isDone(race) && sameRace(race, this.lastRace);
+    },
+
+    nextRace() {
+      if (!this.onResultsScreen()) return;
       const button = findRaceAgainButton();
       if (button) {
         LOG("clicking", button.textContent.trim());
@@ -786,7 +880,9 @@
     },
 
     reloadRace() {
-      if (readRace()) location.reload();
+      if (!this.onResultsScreen()) return;
+      LOG("no new race after Race Again: reloading the race page");
+      location.reload();
     },
   };
 
@@ -1018,8 +1114,10 @@
       if (!this.state.active) return;
       // Problems that won't fix themselves end the session (and notify you).
       if (/^(Stopped|Can't|Race didn't)/.test(message)) this.stop(message);
-      // The race page went away mid-race: try for another one.
-      else this.scheduleNext(3000);
+      // The race went away mid-race: just wait for the next one to show up.
+      // (Never reload here: leaving a race early gets you the "Currently in a
+      // Race" lock-out.)
+      else this.say("Race closed. Waiting for the next race…");
     },
     attachOfficial(at, official) {
       const race = this.stats.find((r) => r.at === at);
@@ -1039,9 +1137,11 @@
           this.say("Back from the break…");
         }
         toEngines({ cmd: "next" });
-        // No new race soon (no button found?): reload the race page.
+        // Still on the results screen 15 s later (no button found?): reload.
+        // Engines only do that if the finished race is still on screen, never
+        // once a new race (or its lobby) has appeared.
         timers.clear(this.fallbackTimer);
-        this.fallbackTimer = timers.set(() => this.state.active && toEngines({ cmd: "reload" }), 12000);
+        this.fallbackTimer = timers.set(() => this.state.active && toEngines({ cmd: "reload" }), 15000);
       }, delay);
     },
     resetStats() {
@@ -1088,6 +1188,7 @@
         panel.render();
         break;
       case "raceStart":
+      case "raceSeen":
         session.raceStarted();
         break;
       case "raceDone":
@@ -1102,6 +1203,9 @@
       case "debug":
         session.debug.set(source, { ...msg.info, at: Date.now() });
         panel.renderDebug?.();
+        break;
+      case "say":
+        if (session.state.active) session.say(msg.message);
         break;
       case "needNext":
         if (session.state.active) session.scheduleNext(800);

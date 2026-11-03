@@ -15,6 +15,10 @@
     nitros=N                                   nitros the player owns (default 3)
     again=none                                 no "Race Again" button (reload needed)
     frame=1                                    put the race inside an iframe
+    rerender=1                                 mid-race, the letters vanish for a moment and come back as new elements
+    inrace=1                                   first load shows the "Currently in a Race" popup; Try Again starts the race
+  Page loads are counted in sessionStorage "mock-loads" (window.__loads), and
+  clicks on a decoy "New Race" link in window.__decoyClicks.
   Results go to sessionStorage "mock-results" (survives reloads) and
   window.__results.
 -->
@@ -48,12 +52,19 @@
         const countdown = Number(params.get("countdown") ?? 1500);
         const noAgain = params.get("again") === "none";
         let nitrosLeft = Number(params.get("nitros") ?? 3);
+        const loads = Number(sessionStorage.getItem("mock-loads") || 0) + 1;
+        sessionStorage.setItem("mock-loads", String(loads));
+        window.__loads = loads;
+        window.__decoyClicks = 0;
+        const rerender = params.get("rerender") === "1";
         const stored = JSON.parse(sessionStorage.getItem("mock-results") || "[]");
         window.__results = stored;
         let raceNo = stored.length;
         let untrusted = 0;
         let earlyKeys = 0;
 
+        // A site menu link that must never be clicked by the script.
+        document.write(`<nav><a href="#" class="decoy" onclick="event.preventDefault(); window.__decoyClicks++">New Race</a></nav>`);
         // Like Nitro Type's header: WPM and accuracy that are NOT race results.
         document.write(`<div class="profile-stats"><span>Avg Speed</span> <b>88 WPM</b> <span>Acc</span> <b>96%</b></div>`);
         document.write(`<div class="dash"><div class="dash-copy"></div><input class="dash-copy-input" autocomplete="off"></div><div id="after"></div>`);
@@ -100,13 +111,24 @@
           r.pos = pos;
           if (pos < r.text.length) r.spans[pos].classList.add("is-waiting");
           else finish();
+          if (rerender && !r.rerendered && pos >= 40 && pos < r.text.length) {
+            r.rerendered = true;
+            const words = [...copy.childNodes];
+            copy.replaceChildren(); // gone for a moment...
+            setTimeout(() => {
+              // ...then back, as brand-new elements with the same classes.
+              const fresh = words.map((w) => w.cloneNode(true));
+              copy.replaceChildren(...fresh);
+              r.spans = [...copy.querySelectorAll(".dash-letter")].slice(0, r.text.length);
+            }, 600);
+          }
         }
 
         function type(ch, isTrusted) {
           const r = race;
           if (!isTrusted) return void untrusted++;
           if (!r.started) return void earlyKeys++;
-          if (r.pos >= r.text.length) return;
+          if (r.pos >= r.text.length || r.spans[r.pos]?.isConnected === false) return;
           if (ch === r.text[r.pos]) {
             r.correct++;
             moveTo(r.pos + 1);
@@ -184,7 +206,24 @@
         });
         document.dispatchEvent(probe);
 
-        newRace();
+        if (params.get("inrace") === "1" && !sessionStorage.getItem("mock-inrace-done")) {
+          document.body.insertAdjacentHTML(
+            "beforeend",
+            `<div class="modal modal--error" id="inrace"><h2>Currently in a Race</h2>
+              <p>You are currently engaged in an active race. You must wait a moment until you are disqualified from that race before you can continue.</p>
+              <button class="garage">Go To Your Garage</button><button class="retry">Try Again</button></div>`,
+          );
+          window.__garageClicks = 0;
+          document.querySelector("#inrace .garage").addEventListener("click", () => window.__garageClicks++);
+          document.querySelector("#inrace .retry").addEventListener("click", (e) => {
+            if (!e.isTrusted) return void untrusted++;
+            sessionStorage.setItem("mock-inrace-done", "1");
+            document.getElementById("inrace").remove();
+            newRace();
+          });
+        } else {
+          newRace();
+        }
       }
     </script>
   </body>

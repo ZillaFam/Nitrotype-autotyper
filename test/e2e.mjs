@@ -180,11 +180,54 @@ try {
     await context.close();
   });
 
+  // Regression: the page must never be reloaded or left while you're in a
+  // race, its lobby or its countdown (Nitro Type then locks you out with
+  // "Currently in a Race").
+  await test("slow lobby: never reloads or leaves early", async (name) => {
+    // 14 s before GO each race: longer than the old 12 s reload fallback.
+    const { context, page } = await open("?countdown=14000", { ...BASE, wpmMin: 200, wpmMax: 200, races: 2 });
+    await page.locator(".go").click();
+    const rs = await waitForResults(page, 2, 90000);
+    check(`${name}: both races finished`, rs.length === 2);
+    check(`${name}: page never reloaded`, (await page.evaluate(() => window.__loads)) === 1, `loads ${await page.evaluate(() => window.__loads)}`);
+    check(`${name}: site menu "New Race" link never clicked`, (await page.evaluate(() => window.__decoyClicks)) === 0);
+    await page.waitForTimeout(1000);
+    check(`${name}: session finished`, (await status(page)) === "Done: 2 races", await status(page));
+    await context.close();
+  });
+
+  await test("letters redrawn mid-race", async (name) => {
+    const { context, page } = await open("?rerender=1&countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, races: 1 });
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1, 60000);
+    check(`${name}: keeps typing the same race to the end`, r.correct > 100 && r.wrong === 0, `correct ${r.correct}, wrong ${r.wrong}`);
+    check(`${name}: page never reloaded`, (await page.evaluate(() => window.__loads)) === 1);
+    check(`${name}: no other link clicked`, (await page.evaluate(() => window.__decoyClicks)) === 0);
+    await page.waitForTimeout(1000);
+    check(`${name}: session finished`, (await status(page)) === "Done: 1 race", await status(page));
+    await context.close();
+  });
+
+  await test('"Currently in a Race" popup', async (name) => {
+    const { context, page } = await open("?inrace=1&countdown=500", { ...BASE, wpmMin: 200, wpmMax: 200, races: 1 });
+    await page.locator(".go").click();
+    await page.waitForTimeout(1500);
+    const msg = await status(page);
+    check(`${name}: explains it's waiting`, /still in your last race\. Trying again in \d+s/.test(msg), msg);
+    await page.waitForTimeout(5000);
+    check(`${name}: doesn't click too soon, or "Go To Your Garage"`, (await page.locator("#inrace").count()) === 1 && (await page.evaluate(() => window.__garageClicks)) === 0);
+    const [r] = await waitForResults(page, 1, 60000);
+    check(`${name}: presses Try Again after the wait and races`, r.correct > 100, `wpm ${r.wpm.toFixed(1)}`);
+    check(`${name}: page never reloaded`, (await page.evaluate(() => window.__loads)) === 1);
+    await context.close();
+  });
+
   await test("no Race Again button: reload fallback", async (name) => {
     const { context, page } = await open("?again=none&countdown=800", { ...BASE, wpmMin: 200, wpmMax: 200, races: 2 });
     await page.locator(".go").click();
     const rs = await waitForResults(page, 2, 60000);
     check(`${name}: second race after reload`, rs.length === 2);
+    check(`${name}: reloaded once, from the results screen`, (await page.evaluate(() => window.__loads)) === 2, `loads ${await page.evaluate(() => window.__loads)}`);
     await page.waitForTimeout(1000);
     check(`${name}: session finished`, (await status(page)) === "Done: 2 races", await status(page));
     await context.close();
