@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      2.1.1
+// @version      2.1.2
 // @description  Types Nitro Type races for you: a WPM range, target accuracy, human-like rhythm and typos, nitros on the longest words, and multi-race sessions with stats.
 // @match        https://www.nitrotype.com/*
 // @match        https://nitrotype.com/*
@@ -791,7 +791,7 @@
     },
     init() {
       if (LOADED_LATE) {
-        this.message = "Loaded late, so it may not type. In Tampermonkey set Inject mode to Instant, then reload.";
+        this.message = 'Loaded late, so it may not type. In Tampermonkey settings set Content Script API to "UserScripts API Dynamic", then reload.';
       }
       this.state = { ...this.state, ...readJSON(sessionStorage, KEYS.session, {}) };
       this.stats = readJSON(localStorage, KEYS.stats, []);
