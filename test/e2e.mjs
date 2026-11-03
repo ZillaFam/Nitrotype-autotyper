@@ -78,6 +78,13 @@ function checkRace(name, r, { wpm, accuracy, accTol = 4.5 }) {
 }
 
 try {
+  await test("auto-update header", async (name) => {
+    const header = (key) => script.match(new RegExp(`^// @${key}\\s+(.+)$`, "m"))?.[1].trim();
+    const raw = "https://raw.githubusercontent.com/ZillaFam/Nitrotype-autotyper/HEAD/nitrotype-autotyper.user.js";
+    check(`${name}: @updateURL and @downloadURL point at the repo`, header("updateURL") === raw && header("downloadURL") === raw);
+    check(`${name}: @version matches the version shown in the panel`, script.includes(`const VERSION = "${header("version")}"`), header("version"));
+  });
+
   await test("single race (keypress)", async (name) => {
     const { context, page } = await open("?listen=keypress", { ...BASE, wpmMin: 120, wpmMax: 120 });
     check(`${name}: idle until Start`, (await page.evaluate(() => document.querySelectorAll(".is-typed").length)) === 0);
@@ -120,8 +127,8 @@ try {
     await context.close();
   });
 
-  await test("3 races with Race Again + WPM range + stats", async (name) => {
-    const { context, page } = await open("?listen=keypress&countdown=800", { ...BASE, wpmMin: 90, wpmMax: 130, accuracy: 97, races: 3 });
+  await test("3 races with Race Again + WPM/accuracy ranges + stats", async (name) => {
+    const { context, page } = await open("?listen=keypress&countdown=800", { ...BASE, wpmMin: 90, wpmMax: 130, accMin: 94, accMax: 98, races: 3 });
     await page.locator(".go").click();
     await page.waitForTimeout(1500);
     check(`${name}: header shows race 1/3`, (await page.locator(".count").textContent()) === "race 1/3");
@@ -133,7 +140,43 @@ try {
     await page.locator('nav button[data-tab="stats"]').click();
     check(`${name}: stats show 3 races`, (await page.locator(".s-races").textContent()) === "3");
     check(`${name}: history has 3 rows`, (await page.locator(".history tr").count()) === 3);
+
+    const stats = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-stats")));
+    check(`${name}: each race picked an accuracy in 94–98%`, stats.every((r) => r.accTarget >= 94 && r.accTarget <= 98), stats.map((r) => r.accTarget).join(", "));
+    const shown = rs.map((r) => r.shown);
+    check(
+      `${name}: Nitro Type's own results attached (WPM, place, money, XP)`,
+      stats.every((r, i) => r.official && r.official.wpm === shown[i].wpm && r.official.place === shown[i].place && r.official.money === shown[i].money && r.official.xp === shown[i].xp),
+      JSON.stringify(stats.map((r) => r.official)),
+    );
+    check(`${name}: header widget (avg WPM) not mistaken for results`, stats.every((r) => r.official?.wpm !== 88));
+    check(`${name}: money card adds up`, (await page.locator(".s-money").textContent()) === `$${shown.reduce((a, r) => a + r.money, 0).toLocaleString()}`, await page.locator(".s-money").textContent());
+    check(`${name}: no estimate marks`, (await page.locator(".footnote").textContent()) === "");
+
+    const points = await page.locator(".chart-svg polyline").getAttribute("points");
+    check(`${name}: chart plots 3 races`, points?.trim().split(" ").length === 3, points);
+    const chartBox = await page.locator(".chart").boundingBox();
+    await page.mouse.move(chartBox.x + chartBox.width - 10, chartBox.y + chartBox.height / 2);
+    const tip = await page.locator(".chart .tip").textContent();
+    check(`${name}: chart tooltip on hover`, (await page.locator(".chart .tip").isVisible()) && /\d+ WPM · [\d.]+% · /.test(tip), tip);
     if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-stats.png") });
+    await context.close();
+  });
+
+  await test("long breaks between races", async (name) => {
+    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 200, wpmMax: 200, races: 2, breakEvery: 1, breakLenMin: 0.1, breakLenMax: 0.1 });
+    await page.evaluate(() => (document.title = "Nitro Type"));
+    await page.locator(".go").click();
+    await waitForResults(page, 1);
+    await page.waitForTimeout(1500);
+    const msg = await status(page);
+    check(`${name}: takes a break after the race`, /^On a break · 0:0\d left$/.test(msg), msg);
+    check(`${name}: tab title shows the break`, (await page.title()).startsWith("❚❚ 1/2 · "), await page.title());
+    const breakSeenAt = Date.now();
+    const rs = await waitForResults(page, 2, 60000);
+    check(`${name}: next race only after the break`, Date.now() - breakSeenAt > 3500 && rs.length === 2);
+    await page.waitForTimeout(1000);
+    check(`${name}: session finished`, (await status(page)) === "Done: 2 races", await status(page));
     await context.close();
   });
 
@@ -168,10 +211,19 @@ try {
     window.setInterval = (fn, ms, ...args) => realSetInterval(fn, Math.max(1000, ms || 0), ...args);
     Object.defineProperty(document, "hidden", { get: () => true });
     Object.defineProperty(document, "visibilityState", { get: () => "hidden" });
+    // Record desktop notifications instead of showing them.
+    window.__notes = [];
+    window.Notification = class {
+      static permission = "granted";
+      static requestPermission = async () => "granted";
+      constructor(title, opts) {
+        window.__notes.push(`${title}: ${opts?.body}`);
+      }
+    };
   }
 
   await test("background tab (throttled page timers)", async (name) => {
-    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, accuracy: 97, races: 2, nitros: 0 }, null, simulateBackgroundTab);
+    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, accuracy: 97, races: 2, nitros: 0, notify: true }, null, simulateBackgroundTab);
     await page.evaluate(() => {
       document.title = "Nitro Type";
     });
@@ -182,6 +234,8 @@ try {
     for (const r of rs) checkRace(name, r, { wpm: 120, accuracy: 97 });
     await page.waitForTimeout(1500);
     check(`${name}: title says done`, (await page.title()) === "✓ Done: 2 races · Nitro Type", await page.title());
+    const notes = await page.evaluate(() => window.__notes);
+    check(`${name}: desktop notification when done`, notes.length === 1 && notes[0] === "NT Autotyper: Done: 2 races", JSON.stringify(notes));
     await context.close();
   });
 
@@ -217,6 +271,7 @@ try {
   await test("controls: stop key, shortcut, drag, collapse", async (name) => {
     const { context, page } = await open("?countdown=300", { ...BASE, wpmMin: 60, wpmMax: 60, races: 3 });
     if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-race.png") });
+    check(`${name}: setting labels filled in`, (await page.locator('[data-show="variance"]').textContent()) === "25" && (await page.locator(".accLabel").textContent()) === "100%");
     await page.locator(".go").click();
     await page.waitForTimeout(1500);
     const typed = () => page.evaluate(() => document.querySelectorAll(".is-typed").length);
@@ -240,10 +295,31 @@ try {
     const before = await page.locator(".box").boundingBox();
     await page.mouse.move(before.x + 60, before.y + 15);
     await page.mouse.down();
-    await page.mouse.move(before.x + 360, before.y - 185, { steps: 8 });
+    const dy = -Math.min(100, Math.floor(before.y));
+    await page.mouse.move(before.x + 360, before.y + 15 + dy, { steps: 8 });
     await page.mouse.up();
     const after = await page.locator(".box").boundingBox();
-    check(`${name}: drag moves the panel`, Math.abs(after.x - before.x - 300) < 3 && Math.abs(after.y - before.y + 200) < 3, `${before.x},${before.y} -> ${after.x},${after.y}`);
+    check(`${name}: drag moves the panel`, Math.abs(after.x - before.x - 300) < 3 && Math.abs(after.y - before.y - dy) < 3, `${before.x},${before.y} -> ${after.x},${after.y}`);
+
+    // Debug view
+    await page.locator('nav button[data-tab="panel"]').click();
+    await page.locator('input[data-k="debug"]').check();
+    await page.waitForTimeout(1500);
+    const dbg = await page.locator("pre.debug").textContent();
+    check(`${name}: debug view shows the race`, (await page.locator("pre.debug").isVisible()) && /race: \d+ letters, at \d+/.test(dbg) && dbg.includes("classes: dash-letter"), dbg.split("\n").slice(0, 12).join(" / "));
+    check(`${name}: debug view shows timers and load timing`, dbg.includes("timers: worker") && dbg.includes("script loaded: on time"));
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-debug.png") });
+
+    // Compact mode
+    await page.locator(".compact-btn").click();
+    const compact = await page.locator(".box").boundingBox();
+    check(`${name}: compact mode is small but keeps Start`, compact.height < 150 && (await page.locator(".go").isVisible()) && !(await page.locator(".tabs").isVisible()), `height ${compact.height}`);
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-compact.png") });
+    await page.reload();
+    await page.waitForSelector(".go", { state: "attached" });
+    check(`${name}: compact mode remembered`, (await page.locator(".box").boundingBox()).height < 150);
+    await page.locator(".compact-btn").click();
+    await page.locator('input[data-k="debug"]').uncheck();
 
     await page.locator(".collapse").click();
     const collapsed = await page.locator(".box").boundingBox();

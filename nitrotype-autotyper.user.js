@@ -1,8 +1,12 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      2.1.2
-// @description  Types Nitro Type races for you: a WPM range, target accuracy, human-like rhythm and typos, nitros on the longest words, and multi-race sessions with stats.
+// @version      3.0.0
+// @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
+// @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
+// @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
+// @updateURL    https://raw.githubusercontent.com/ZillaFam/Nitrotype-autotyper/HEAD/nitrotype-autotyper.user.js
+// @downloadURL  https://raw.githubusercontent.com/ZillaFam/Nitrotype-autotyper/HEAD/nitrotype-autotyper.user.js
 // @match        https://www.nitrotype.com/*
 // @match        https://nitrotype.com/*
 // @match        https://*.nitrotype.com/*
@@ -36,6 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
+  const VERSION = "3.0.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -397,6 +402,52 @@
     return null;
   }
 
+  // Visible text of an element, with spaces between separate bits of text.
+  function textOf(el) {
+    const parts = [];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const t = walker.currentNode.nodeValue.trim();
+      if (t) parts.push(t);
+    }
+    return parts.join(" ").replace(/\s+/g, " ");
+  }
+
+  /** Small blocks of text that mention both WPM and accuracy, smallest first. */
+  function resultCandidates() {
+    const out = [];
+    for (const el of document.querySelectorAll("div, section, table, ul, dl")) {
+      if (el.closest(".dash-copy") || el === panelHost) continue;
+      const raw = el.textContent;
+      if (raw.length > 800 || !/wpm/i.test(raw) || !/acc/i.test(raw)) continue;
+      out.push({ el, text: textOf(el) });
+    }
+    return out.sort((a, b) => a.text.length - b.text.length);
+  }
+
+  const toNumber = (str) => (str === undefined ? undefined : Number(str.replace(/,/g, "")));
+
+  /** { wpm, accuracy, place, money, xp } from a results text; missing ones undefined. */
+  function parseResults(text) {
+    const pick = (...res) => {
+      for (const re of res) {
+        const m = text.match(re);
+        if (m) return m[1];
+      }
+      return undefined;
+    };
+    const wpm = toNumber(pick(/(\d{1,3}(?:\.\d+)?)\s*WPM/i, /WPM\s*:?\s*(\d{1,3}(?:\.\d+)?)/i));
+    const accuracy = toNumber(pick(/(\d{1,3}(?:\.\d+)?)\s*%\s*acc/i, /acc(?:uracy)?\s*:?\s*(\d{1,3}(?:\.\d+)?)\s*%/i));
+    return {
+      wpm: wpm > 0 && wpm < 500 ? wpm : undefined,
+      accuracy: accuracy > 0 && accuracy <= 100 ? accuracy : undefined,
+      // "2nd", or "2 nd" when the suffix is a separate <sup>.
+      place: toNumber(pick(/\b(\d{1,2})\s?(?:st|nd|rd|th)\b/i)),
+      money: toNumber(pick(/\$\s*([\d,]+)/)),
+      xp: toNumber(pick(/\+?([\d,]+)\s*XP\b/i, /\bXP\s*:?\s*\+?([\d,]+)/i)),
+    };
+  }
+
   // =========================================================================
   // 5. Human rhythm
   // =========================================================================
@@ -515,11 +566,15 @@
       const lo = Math.min(s.wpmMin, s.wpmMax);
       const hi = Math.max(s.wpmMin, s.wpmMax);
       const target = Math.min(hi, Math.floor(rand(lo, hi + 1)));
+      // Accuracy for this race, somewhere in the range (to 0.1%).
+      const accTarget = Math.round(rand(Math.min(s.accMin, s.accMax), Math.max(s.accMin, s.accMax)) * 10) / 10;
       const rhythm = rhythmFor(text);
       const nitroAt = nitroWordStarts(text, s.nitros);
       LOG("race text:", text);
       LOG("letter classes:", [...document.querySelectorAll(".dash-letter")].slice(0, 3).map((el) => el.className));
-      LOG("target WPM:", target, "nitro words at:", [...nitroAt]);
+      LOG("target WPM:", target, "accuracy:", accTarget, "nitro words at:", [...nitroAt]);
+      this.dbg = { sent: 0, typos: 0, nitrosTried: 0, nitrosUsed: 0, target, accTarget };
+      this.watchResults.snapshot(); // what's on screen before the race
       focusRace();
 
       // Wait for GO: keep trying the first key until Nitro Type takes it.
@@ -572,6 +627,7 @@
             accuracy: (100 * correct) / Math.max(1, correct + wrong),
             nitros: nitrosUsed,
             target,
+            accTarget,
             chars: text.length,
             at: Date.now(),
           });
@@ -580,6 +636,7 @@
         if (pendingNitro >= 0) {
           if (pos > pendingNitro) {
             nitrosUsed++;
+            this.dbg.nitrosUsed++;
             skipped += pos - pendingNitro;
           } else if (now - lastPressAt < NITRO_WAIT_MS) {
             nextAt = now + 15;
@@ -607,6 +664,7 @@
         // Nitro at the start of one of the longest words.
         if (nitroAt.has(pos) && !triedNitro.has(pos)) {
           triedNitro.add(pos);
+          this.dbg.nitrosTried++;
           pressKey("\n", rand(40, 90));
           pendingNitro = pos;
           lastPressAt = now;
@@ -614,8 +672,8 @@
           continue;
         }
 
-        const { accuracy, variance } = this.settings;
-        const pTypo = typoChance(accuracy);
+        const { variance } = this.settings;
+        const pTypo = typoChance(accTarget);
         const perChar = 12000 / target; // 60 s / (wpm * 5 chars)
         const interval = Math.max(5, (perChar - (pTypo * (REACTION_MS[0] + REACTION_MS[1])) / 2) / (1 + pTypo));
 
@@ -626,6 +684,8 @@
           if (typo) {
             pressKey(typo, rand(40, 100));
             wrong++;
+            this.dbg.typos++;
+            this.dbg.sent++;
             nextAt = now + rand(REACTION_MS[0], REACTION_MS[1]);
             continue;
           }
@@ -633,6 +693,7 @@
 
         pressKey(text[pos], rand(40, 100));
         correct++;
+        this.dbg.sent++;
         lastPressAt = now;
         lastPressPos = pos;
 
@@ -652,7 +713,66 @@
       if (id !== this.runId) return;
       this.running = false;
       this.status(message, result ? { target: result.target, wpm: result.wpm, done: true } : {});
-      if (result) toTop({ kind: "raceDone", result });
+      if (result) {
+        toTop({ kind: "raceDone", result });
+        this.watchResults.start(result.at);
+      } else {
+        toTop({ kind: "raceFailed", message });
+      }
+    },
+
+    // ---- Nitro Type's own results ------------------------------------------
+    //
+    // After the finish line Nitro Type shows its official WPM, accuracy,
+    // place, money and XP. We don't know its exact markup, so we look for a
+    // small block of text that mentions both "WPM" and accuracy and wasn't
+    // on screen before the race (so a "your average WPM" widget doesn't count).
+    watchResults: {
+      before: new Set(),
+      found: null,
+      snapshot() {
+        this.before = new Set(resultCandidates().map((c) => c.text));
+        this.found = null;
+      },
+      start(raceAt) {
+        const startedAt = Date.now();
+        const poll = () => {
+          const fresh = resultCandidates().filter((c) => !this.before.has(c.text));
+          const official = fresh.map((c) => ({ ...parseResults(c.text), text: c.text })).find((r) => r.wpm);
+          if (official) {
+            this.found = official;
+            LOG("Nitro Type results:", official);
+            toTop({ kind: "raceResult", at: raceAt, official });
+          } else if (Date.now() - startedAt < 10000) {
+            timers.set(poll, 400);
+          } else {
+            this.found = { notFound: true };
+          }
+        };
+        timers.set(poll, 300);
+      },
+    },
+
+    // What the debug view shows for this frame.
+    debugInfo() {
+      const race = readRace();
+      const spans = document.querySelectorAll(".dash-letter");
+      const d = this.dbg ?? {};
+      const target = typingTarget();
+      const found = this.watchResults.found;
+      return {
+        frame: IS_TOP ? "top page" : `iframe ${location.host}${location.pathname}`,
+        race: race ? `${race.text.length} letters, at ${race.pos ?? "?"}` : "no .dash-letter spans",
+        text: race ? `${race.text.slice(0, 48)}…` : "",
+        classes: [...spans].slice(0, 3).map((el) => el.className).join(" | ") || "-",
+        current: document.querySelector(".dash-letter.is-waiting")?.className ?? "-",
+        keys: d.sent === undefined ? "-" : `${d.sent} sent, ${d.typos} typos (target ${d.target} WPM, ${d.accTarget}%)`,
+        nitros: d.sent === undefined ? "-" : `${d.nitrosUsed} used / ${d.nitrosTried} tried`,
+        typingInto: `${target.tagName.toLowerCase()}${target.className && typeof target.className === "string" ? "." + target.className.trim().split(/\s+/).join(".") : ""}`,
+        raceAgain: findRaceAgainButton()?.textContent.trim() || "no button found",
+        results: !found ? "-" : found.notFound ? "not found on screen" : `${found.wpm} WPM, ${found.accuracy ?? "?"}%, place ${found.place ?? "?"}, $${found.money ?? "?"}, ${found.xp ?? "?"} XP`,
+        timers: timers.usingWorker ? "worker (full speed in background)" : "page timers (slowed in background)",
+      };
     },
 
     nextRace() {
@@ -671,6 +791,9 @@
   };
 
   timers.every(() => engine.tick(), 250);
+  timers.every(() => {
+    if (engine.settings?.debug && (IS_TOP || readRace())) toTop({ kind: "debug", info: engine.debugInfo() });
+  }, 1000);
 
   // Safety stop and shortcut, in every frame.
   const isShortcut = (e) => e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyA";
@@ -741,8 +864,17 @@
   // 8. Settings, session and stats (top page)
   // =========================================================================
 
-  const DEFAULTS = { wpmMin: 80, wpmMax: 95, accuracy: 97, variance: 25, nitros: 1, races: 5 };
-  const LIMITS = { wpmMin: [10, 300], wpmMax: [10, 300], accuracy: [80, 100], variance: [0, 60], nitros: [0, 10], races: [1, 500] };
+  const DEFAULTS = {
+    wpmMin: 80, wpmMax: 95, accMin: 96, accMax: 98, variance: 25, nitros: 1, races: 5,
+    breakEvery: 0, breakLenMin: 1, breakLenMax: 3, // long break every ~N races (0 = off), minutes
+    notify: false, debug: false,
+  };
+  const LIMITS = {
+    wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
+    nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
+  };
+  // Settings that come as a min/max pair.
+  const PAIRS = { wpmMin: "wpmMax", accMin: "accMax", breakLenMin: "breakLenMax" };
   const KEYS = { settings: "nt-autotyper-settings", stats: "nt-autotyper-stats", ui: "nt-autotyper-ui", session: "nt-autotyper-session" };
 
   function readJSON(storage, key, fallback) {
@@ -761,12 +893,20 @@
   }
 
   function normalize(raw) {
+    raw = { ...raw };
+    // Older versions had a single accuracy value.
+    if (raw.accuracy !== undefined && raw.accMin === undefined) raw.accMin = raw.accMax = raw.accuracy;
+    delete raw.accuracy;
     const s = { ...DEFAULTS, ...raw };
     for (const [key, [min, max]] of Object.entries(LIMITS)) {
       const n = Number(s[key]);
       s[key] = Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : DEFAULTS[key];
     }
-    for (const key of ["wpmMin", "wpmMax", "nitros", "races", "variance"]) s[key] = Math.round(s[key]);
+    for (const key of ["wpmMin", "wpmMax", "nitros", "races", "variance", "breakEvery"]) s[key] = Math.round(s[key]);
+    for (const key of ["accMin", "accMax"]) s[key] = Math.round(s[key] * 2) / 2;
+    for (const key of ["breakLenMin", "breakLenMax"]) s[key] = Math.round(s[key] * 10) / 10;
+    s.notify = Boolean(s.notify);
+    s.debug = Boolean(s.debug);
     return s;
   }
 
@@ -776,7 +916,10 @@
   // The session lives in sessionStorage so it survives a reload of this tab
   // (used to get a fresh race) but never restarts by itself in a new tab.
   const session = {
-    state: { active: false, total: 0, done: 0 },
+    // sinceBreak/breakAfter: races since the last long break, and how many to
+    // run before the next one. breakUntil: end of the current break (ms).
+    state: { active: false, total: 0, done: 0, sinceBreak: 0, breakAfter: 0, breakUntil: 0 },
+    debug: new Map(), // frame window -> latest debug snapshot
     stats: [], // finished races, newest last
     fallbackTimer: 0,
     nextTimer: 0,
@@ -799,12 +942,21 @@
     save() {
       writeJSON(sessionStorage, KEYS.session, this.state);
     },
+    onBreak() {
+      return this.state.active && Date.now() < this.state.breakUntil;
+    },
     sync() {
-      toEngines({ settings: loadSettings(), armed: this.state.active });
+      // Engines stay disarmed during a break, even if a race shows up.
+      toEngines({ settings: loadSettings(), armed: this.state.active && !this.onBreak() });
+    },
+    pickBreakAfter(s) {
+      if (!s.breakEvery) return 0;
+      // Roughly every N races, +/- 20%, so breaks don't land like clockwork.
+      return Math.max(1, Math.round(s.breakEvery * rand(0.8, 1.2)));
     },
     start() {
       const s = loadSettings();
-      this.state = { active: true, total: s.races, done: 0 };
+      this.state = { active: true, total: s.races, done: 0, sinceBreak: 0, breakAfter: this.pickBreakAfter(s), breakUntil: 0 };
       this.save();
       this.sync();
       this.say("Waiting for a race…");
@@ -815,8 +967,12 @@
       this.state.active = false;
       this.save();
       this.sync();
-      // Leave a mark in the tab title if you weren't watching.
+      this.state.breakUntil = 0;
+      // Leave a mark in the tab title (and maybe a notification) if you
+      // weren't watching.
+      const away = document.hidden || !document.hasFocus();
       if (document.hidden) titleFlash = message.startsWith("Done") ? `✓ ${message}` : `■ ${message}`;
+      if (away && !message.includes("you pressed")) notify(message);
       this.say(message);
     },
     toggle() {
@@ -832,18 +988,56 @@
       writeJSON(localStorage, KEYS.stats, this.stats);
       if (!this.state.active) return panel.render();
       this.state.done++;
+      this.state.sinceBreak++;
       this.save();
       if (this.state.done >= this.state.total) {
         this.stop(`Done: ${this.state.total} race${this.state.total === 1 ? "" : "s"}`);
+        return;
+      }
+      const s = loadSettings();
+      if (this.state.breakAfter && this.state.sinceBreak >= this.state.breakAfter) {
+        const ms = rand(Math.min(s.breakLenMin, s.breakLenMax), Math.max(s.breakLenMin, s.breakLenMax)) * 60000;
+        this.state.breakUntil = Date.now() + ms;
+        this.state.sinceBreak = 0;
+        this.state.breakAfter = this.pickBreakAfter(s);
+        this.save();
+        this.sync();
+        this.tickBreak();
+        this.scheduleNext(ms);
       } else {
         this.say("Next race soon…");
         this.scheduleNext(rand(2500, 6000));
       }
     },
+    tickBreak() {
+      if (!this.onBreak()) return;
+      const left = Math.ceil((this.state.breakUntil - Date.now()) / 1000);
+      this.say(`On a break · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left`);
+    },
+    raceFailed(message) {
+      if (!this.state.active) return;
+      // Problems that won't fix themselves end the session (and notify you).
+      if (/^(Stopped|Can't|Race didn't)/.test(message)) this.stop(message);
+      // The race page went away mid-race: try for another one.
+      else this.scheduleNext(3000);
+    },
+    attachOfficial(at, official) {
+      const race = this.stats.find((r) => r.at === at);
+      if (!race) return;
+      race.official = { wpm: official.wpm, accuracy: official.accuracy, place: official.place, money: official.money, xp: official.xp };
+      writeJSON(localStorage, KEYS.stats, this.stats);
+      panel.render();
+    },
     scheduleNext(delay) {
       timers.clear(this.nextTimer);
       this.nextTimer = timers.set(() => {
         if (!this.state.active) return;
+        if (this.state.breakUntil) {
+          this.state.breakUntil = 0;
+          this.save();
+          this.sync();
+          this.say("Back from the break…");
+        }
         toEngines({ cmd: "next" });
         // No new race soon (no button found?): reload the race page.
         timers.clear(this.fallbackTimer);
@@ -859,13 +1053,14 @@
 
   // Progress in the tab title, so you can follow a background tab:
   // "▶ 2/5 · Nitro Type", then "✓ Done: 5 races · …" until you look at it.
-  const TITLE_PREFIX = /^[▶✓■] [^·]* · /;
+  const TITLE_PREFIX = /^(?:[▶✓■]|❚❚) [^·]* · /;
   let titleFlash = "";
   function updateTitle() {
     if (!IS_TOP) return;
     const base = document.title.replace(TITLE_PREFIX, "");
     let prefix = "";
-    if (session.state.active) prefix = `▶ ${session.state.done}/${session.state.total} · `;
+    if (session.onBreak()) prefix = `❚❚ ${session.state.done}/${session.state.total} · `;
+    else if (session.state.active) prefix = `▶ ${session.state.done}/${session.state.total} · `;
     else if (titleFlash) prefix = `${titleFlash} · `;
     if (document.title !== prefix + base) document.title = prefix + base;
   }
@@ -875,6 +1070,16 @@
       updateTitle();
     }
   });
+
+  // Desktop notification (only if you turned it on and allowed it).
+  function notify(message) {
+    if (!loadSettings().notify || !("Notification" in window) || Notification.permission !== "granted") return;
+    try {
+      new Notification("NT Autotyper", { body: message, tag: "nt-autotyper" });
+    } catch {
+      /* some browsers only allow notifications from a service worker */
+    }
+  }
 
   function topHandle(msg, source) {
     switch (msg.kind) {
@@ -887,6 +1092,16 @@
         break;
       case "raceDone":
         session.raceDone(msg.result);
+        break;
+      case "raceFailed":
+        session.raceFailed(msg.message);
+        break;
+      case "raceResult":
+        session.attachOfficial(msg.at, msg.official);
+        break;
+      case "debug":
+        session.debug.set(source, { ...msg.info, at: Date.now() });
+        panel.renderDebug?.();
         break;
       case "needNext":
         if (session.state.active) session.scheduleNext(800);
@@ -916,6 +1131,9 @@
       session.sync();
       updateTitle(); // the page may have changed its title
     }, 1500);
+    timers.every(() => session.tickBreak(), 1000);
+    // Reloaded in the middle of a break: finish the break, then carry on.
+    if (session.onBreak()) session.scheduleNext(session.state.breakUntil - Date.now());
     listen(window, "load", () => session.sync());
     session.sync();
   }
@@ -1019,6 +1237,39 @@
     .empty { color: var(--sub); text-align: center; padding: 8px; }
     .btn2 { all: unset; cursor: pointer; text-align: center; padding: 7px; border-radius: 8px; border: 1px solid var(--line); color: var(--sub); }
     .btn2:hover { color: var(--text); border-color: var(--sub); }
+    .check { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+    .check input { accent-color: var(--accent); margin: 2px 0 0; }
+    .check small { display: block; color: var(--sub); font-size: 11px; }
+    .sep { border: 0; border-top: 1px solid var(--line); margin: 0; }
+    .breaks { display: grid; grid-template-columns: auto 52px auto; align-items: center; gap: 6px; color: var(--sub); font-size: 12px; }
+    .breaks input[type=number] { width: 52px; }
+    .breaks .len { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; }
+    .cards.six { grid-template-columns: repeat(3, 1fr); }
+    .cards.six .v { font-size: 16px; }
+    .footnote { color: var(--sub); font-size: 11px; }
+    .chart-title { display: flex; justify-content: space-between; color: var(--sub); font-size: 12px; margin-bottom: 2px; }
+    .chart { position: relative; touch-action: none; }
+    .chart svg { display: block; overflow: visible; }
+    .chart .tip {
+      position: absolute; top: 0; display: none; pointer-events: none; white-space: nowrap;
+      transform: translate(-50%, -105%); padding: 4px 8px; border-radius: 8px;
+      background: var(--bg); border: 1px solid var(--line); font-size: 11.5px; color: var(--text);
+    }
+    pre.debug {
+      display: none; margin: 8px 0 0; padding: 8px; max-height: 240px; overflow: auto;
+      background: var(--bg); border: 1px solid var(--line); border-radius: 8px; color: var(--sub);
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .debugging pre.debug { display: block; }
+    /* compact mode: just status, progress and the button */
+    .box.compact { resize: none; height: auto !important; min-height: 0; }
+    .compact nav, .compact .tabs, .compact .foot, .compact pre.debug { display: none !important; }
+    .compact .main { flex: none; }
+    .compact .live { padding: 8px 12px 6px; border-bottom: 0; }
+    .compact .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .compact .bar { margin: 6px 0 4px; }
+    .compact .chips { flex-wrap: nowrap; overflow: hidden; }
+    .compact .go { padding: 6px; margin: 2px 8px 8px; }
   `;
 
   const PANEL_HTML = `
@@ -1026,6 +1277,7 @@
       <header>
         <span class="dot"></span>
         <span class="title">NT Autotyper<small class="count"></small></span>
+        <button class="icon compact-btn" title="Compact mode">⊟</button>
         <button class="icon collapse" title="Collapse">▾</button>
       </header>
       <div class="main">
@@ -1033,6 +1285,7 @@
           <div class="status">Idle</div>
           <div class="bar"><i></i></div>
           <div class="chips"></div>
+          <pre class="debug"></pre>
         </div>
         <nav>
           <button data-tab="race" class="on">Race</button>
@@ -1051,8 +1304,12 @@
               <div class="hint">Each race picks a random speed in this range.</div>
             </div>
             <div class="field">
-              <div class="lbl">Accuracy <b><span data-show="accuracy"></span>%</b></div>
-              <div class="row"><input type="range" data-k="accuracy" min="80" max="100" step="0.5"></div>
+              <div class="lbl">Accuracy range <b class="accLabel"></b></div>
+              <div class="range2">
+                <input type="number" data-k="accMin" min="80" max="100" step="0.5"><span>to</span><input type="number" data-k="accMax" min="80" max="100" step="0.5">
+              </div>
+              <div class="row" style="margin-top:6px"><input type="range" data-k="accMin" min="80" max="100" step="0.5"></div>
+              <div class="row"><input type="range" data-k="accMax" min="80" max="100" step="0.5"></div>
             </div>
             <div class="field">
               <div class="lbl">Timing variation <b><span data-show="variance"></span>%</b></div>
@@ -1070,18 +1327,33 @@
                 <div class="hint">Clicks "Race Again" in between.</div>
               </div>
             </div>
+            <div class="field">
+              <div class="lbl">Long breaks <b class="breakLabel"></b></div>
+              <div class="breaks">
+                <span>Every</span><input type="number" data-k="breakEvery" min="0" max="100"><span>races (0 = off)</span>
+                <div class="len">for <input type="number" data-k="breakLenMin" min="0.1" max="30" step="0.5"> to <input type="number" data-k="breakLenMax" min="0.1" max="30" step="0.5"> min</div>
+              </div>
+              <div class="hint">The race count varies a little each time.</div>
+            </div>
           </section>
           <section data-tab="stats">
-            <div class="cards">
+            <div class="cards six">
               <div class="card"><div class="k">Races</div><div class="v s-races"></div></div>
               <div class="card"><div class="k">Avg WPM</div><div class="v s-wpm"></div></div>
-              <div class="card"><div class="k">Avg accuracy</div><div class="v s-acc"></div></div>
+              <div class="card"><div class="k">Avg acc</div><div class="v s-acc"></div></div>
               <div class="card"><div class="k">Best WPM</div><div class="v s-best"></div></div>
+              <div class="card"><div class="k">Money</div><div class="v s-money"></div></div>
+              <div class="card"><div class="k">XP</div><div class="v s-xp"></div></div>
+            </div>
+            <div>
+              <div class="chart-title"><span>WPM per race</span><span class="chart-range"></span></div>
+              <div class="chart"><svg class="chart-svg" role="img" aria-label="WPM per race"></svg><div class="tip"></div></div>
             </div>
             <table>
-              <thead><tr><th>When</th><th>WPM</th><th>Target</th><th>Acc</th><th>Nitros</th></tr></thead>
+              <thead><tr><th>When</th><th>WPM</th><th>Acc</th><th>Place</th><th>Nitros</th></tr></thead>
               <tbody class="history"></tbody>
             </table>
+            <div class="footnote"></div>
             <button class="btn2 reset-stats">Reset stats</button>
           </section>
           <section data-tab="panel">
@@ -1089,8 +1361,14 @@
               <div class="lbl">Opacity when not hovered <b><span class="opLabel"></span>%</b></div>
               <div class="row"><input type="range" class="opacity" min="20" max="100"></div>
             </div>
-            <div class="hint">Drag the header to move the panel. Drag the bottom-right corner to resize it. Click ▾ to collapse it.</div>
+            <div class="hint">Drag the header to move the panel, drag the bottom-right corner to resize it, ⊟ for compact mode, ▾ to collapse it.</div>
             <button class="btn2 reset-panel">Reset position and size</button>
+            <hr class="sep">
+            <label class="check"><input type="checkbox" data-k="notify"><span>Desktop notification when a session ends<small class="notify-hint">Only when you're not looking at the tab.</small></span></label>
+            <label class="check"><input type="checkbox" data-k="debug"><span>Debug view<small>Shows what the script sees on the page. Copy it and send it over if something breaks.</small></span></label>
+            <button class="btn2 copy-debug">Copy debug info</button>
+            <hr class="sep">
+            <div class="hint version"></div>
           </section>
         </div>
         <button class="go">Start</button>
@@ -1108,7 +1386,7 @@
     const $$ = (sel) => [...root.querySelectorAll(sel)];
     const box = $(".box");
     let settings = loadSettings();
-    const UI_DEFAULTS = { x: 16, y: null, w: 290, h: null, collapsed: false, tab: "race", opacity: 100 };
+    const UI_DEFAULTS = { x: 16, y: null, w: 290, h: null, collapsed: false, compact: false, tab: "race", opacity: 100 };
     let ui = { ...UI_DEFAULTS, ...readJSON(localStorage, KEYS.ui, {}) };
     const saveUI = () => writeJSON(localStorage, KEYS.ui, ui);
 
@@ -1125,9 +1403,13 @@
     }
     function applyLayout() {
       box.style.width = `${ui.w}px`;
-      box.style.height = ui.h && !ui.collapsed ? `${ui.h}px` : "";
+      box.style.height = ui.h && !ui.collapsed && !ui.compact ? `${ui.h}px` : "";
       box.classList.toggle("collapsed", ui.collapsed);
+      box.classList.toggle("compact", ui.compact);
+      box.classList.toggle("debugging", settings.debug);
       $(".collapse").textContent = ui.collapsed ? "▸" : "▾";
+      $(".compact-btn").textContent = ui.compact ? "⊞" : "⊟";
+      $(".compact-btn").title = ui.compact ? "Full panel" : "Compact mode";
       box.style.setProperty("--idle-opacity", ui.opacity / 100);
       $(".opacity").value = ui.opacity;
       $(".opLabel").textContent = ui.opacity;
@@ -1156,7 +1438,7 @@
     listen(window, "resize", place);
 
     new ResizeObserver(() => {
-      if (ui.collapsed) return;
+      if (ui.collapsed || ui.compact) return;
       const w = Math.round(box.offsetWidth);
       const h = Math.round(box.offsetHeight);
       if (w !== ui.w || (ui.h !== null && h !== ui.h) || (ui.h === null && box.style.height)) {
@@ -1167,7 +1449,7 @@
     }).observe(box);
     // CSS resize sets an inline height once the user drags the corner.
     new MutationObserver(() => {
-      if (!ui.collapsed && box.style.height) {
+      if (!ui.collapsed && !ui.compact && box.style.height) {
         ui.h = Math.round(box.offsetHeight);
         saveUI();
       }
@@ -1177,6 +1459,13 @@
       ui.collapsed = !ui.collapsed;
       saveUI();
       applyLayout();
+    });
+    $(".compact-btn").addEventListener("click", () => {
+      ui.compact = !ui.compact;
+      if (ui.compact) ui.collapsed = false;
+      saveUI();
+      applyLayout();
+      panel.render();
     });
     for (const tab of $$("nav button")) {
       tab.addEventListener("click", () => {
@@ -1199,39 +1488,82 @@
     });
 
     // ---- settings ----------------------------------------------------------
+    const PAIR_OF = Object.fromEntries(Object.entries(PAIRS).flatMap(([lo, hi]) => [[lo, hi], [hi, lo]]));
+
     function fillSettings() {
-      for (const el of $$("[data-k]")) el.value = settings[el.dataset.k];
+      for (const el of $$("[data-k]")) {
+        if (el.type === "checkbox") el.checked = settings[el.dataset.k];
+        else el.value = settings[el.dataset.k];
+      }
+      fillLabels();
+    }
+    function fillLabels() {
+      const span = (a, b, unit) => {
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b);
+        return lo === hi ? `${lo}${unit}` : `${lo}–${hi}${unit}`;
+      };
       for (const el of $$("[data-show]")) el.textContent = settings[el.dataset.show];
-      fillSettingsLabel();
+      $(".wpmLabel").textContent = span(settings.wpmMin, settings.wpmMax, " WPM");
+      $(".accLabel").textContent = span(settings.accMin, settings.accMax, "%");
+      $(".breakLabel").textContent = settings.breakEvery
+        ? `~${settings.breakEvery} races, ${span(settings.breakLenMin, settings.breakLenMax, " min")}`
+        : "off";
     }
     function applySetting(key, value, keepOrder) {
       settings = normalize({ ...settings, [key]: value });
       // Keep min <= max by pushing the other end (not while typing a number,
       // where "1" on the way to "120" would drag the other end down).
-      if (keepOrder && key === "wpmMin" && settings.wpmMin > settings.wpmMax) settings.wpmMax = settings.wpmMin;
-      if (keepOrder && key === "wpmMax" && settings.wpmMax < settings.wpmMin) settings.wpmMin = settings.wpmMax;
+      const other = PAIR_OF[key];
+      if (keepOrder && other) {
+        const isMin = key in PAIRS;
+        if (isMin ? settings[key] > settings[other] : settings[key] < settings[other]) settings[other] = settings[key];
+      }
       writeJSON(localStorage, KEYS.settings, settings);
       session.sync();
+      applyLayout();
     }
     for (const el of $$("[data-k]")) {
+      if (el.type === "checkbox") {
+        el.addEventListener("change", async () => {
+          const key = el.dataset.k;
+          if (key === "notify" && el.checked && "Notification" in window && Notification.permission !== "granted") {
+            const answer = await Notification.requestPermission().catch(() => "denied");
+            if (answer !== "granted") {
+              el.checked = false;
+              $(".notify-hint").textContent = "Notifications are blocked for nitrotype.com. Allow them in the site settings (padlock icon), then try again.";
+            }
+          }
+          applySetting(key, el.checked);
+          panel.render();
+          panel.renderDebug();
+        });
+        continue;
+      }
       el.addEventListener("input", () => {
         if (el.value === "") return;
         applySetting(el.dataset.k, el.value, el.type === "range");
         // Update everything except the box being typed in.
-        for (const other of $$(`[data-k]`)) if (other !== el) other.value = settings[other.dataset.k];
-        for (const show of $$("[data-show]")) show.textContent = settings[show.dataset.show];
-        fillSettingsLabel();
+        for (const other of $$("[data-k]")) if (other !== el && other.type !== "checkbox") other.value = settings[other.dataset.k];
+        fillLabels();
       });
       el.addEventListener("change", () => {
         if (el.value !== "") applySetting(el.dataset.k, el.value, true);
         fillSettings(); // snap out-of-range values
       });
     }
-    function fillSettingsLabel() {
-      const lo = Math.min(settings.wpmMin, settings.wpmMax);
-      const hi = Math.max(settings.wpmMin, settings.wpmMax);
-      $(".wpmLabel").textContent = lo === hi ? `${lo} WPM` : `${lo}–${hi} WPM`;
-    }
+
+    $(".copy-debug").addEventListener("click", async () => {
+      const text = debugText();
+      try {
+        await navigator.clipboard.writeText(text);
+        $(".copy-debug").textContent = "Copied!";
+      } catch {
+        $(".copy-debug").textContent = "Couldn't copy: select the text in the debug view";
+      }
+      timers.set(() => ($(".copy-debug").textContent = "Copy debug info"), 2000);
+    });
+    $(".version").textContent = `Version ${VERSION}. Tampermonkey updates it automatically; to check now: Tampermonkey menu → Utilities → Check for userscript updates.`;
 
     $(".go").addEventListener("click", () => {
       session.toggle();
@@ -1262,24 +1594,144 @@
       if (active) chips.push(`done <b>${session.state.done}</b>/${session.state.total}`);
       setHTML($(".chips"), chips.map((c) => `<span class="chip">${c}</span>`).join(""));
 
-      if (ui.tab === "stats") renderStats();
+      if (ui.tab === "stats" && !ui.compact) renderStats();
+      panel.renderDebug();
     };
+
+    // ---- debug view --------------------------------------------------------
+    function debugText() {
+      const lines = [
+        `NT Autotyper ${VERSION}`,
+        `script loaded: ${LOADED_LATE ? "LATE (after the page)" : "on time"}`,
+        `session: ${session.state.active ? `on, ${session.state.done}/${session.state.total} done${session.onBreak() ? ", on a break" : ""}` : "off"}`,
+        `notifications: ${"Notification" in window ? Notification.permission : "not supported"}`,
+        `page: ${location.host}${location.pathname}`,
+      ];
+      const fresh = [...session.debug.values()].filter((d) => Date.now() - d.at < 5000);
+      if (!fresh.length) lines.push("", "(no report from the race frame yet)");
+      for (const d of fresh) {
+        lines.push("", `-- ${d.frame} --`);
+        for (const [k, v] of Object.entries(d)) if (k !== "frame" && k !== "at" && v !== "") lines.push(`${k}: ${v}`);
+      }
+      return lines.join("\n");
+    }
+    panel.renderDebug = () => {
+      if (settings.debug && !ui.compact) $("pre.debug").textContent = debugText();
+    };
+
+    // ---- chart ---------------------------------------------------------------
+    const wpmOf = (r) => r.official?.wpm ?? r.wpm;
+    const accOf = (r) => r.official?.accuracy ?? r.accuracy;
+    const LINE = "#d07f10"; // checked for contrast and lightness on the panel background
+    let chartGeom = null;
+
+    function renderChart() {
+      const wrap = $(".chart");
+      const svg = $(".chart-svg");
+      const races = session.stats.slice(-40);
+      const W = Math.round(wrap.clientWidth);
+      if (!W) return;
+      const H = 110;
+      svg.setAttribute("width", W);
+      svg.setAttribute("height", H);
+      $(".chart-range").textContent = races.length ? `last ${races.length} race${races.length === 1 ? "" : "s"}` : "";
+      if (races.length < 2) {
+        chartGeom = null;
+        setHTML(svg, `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="#8e9cc9" font-size="12">The chart starts after 2 races</text>`);
+        return;
+      }
+      const vals = races.map(wpmOf);
+      let lo = Math.min(...vals);
+      let hi = Math.max(...vals);
+      const padV = Math.max(5, (hi - lo) * 0.15);
+      lo = Math.max(0, Math.floor((lo - padV) / 5) * 5);
+      hi = Math.ceil((hi + padV) / 5) * 5;
+      const L = 30;
+      const R = 8;
+      const T = 8;
+      const B = 8;
+      const x = (i) => L + (i * (W - L - R)) / (races.length - 1);
+      const y = (v) => T + ((hi - v) * (H - T - B)) / (hi - lo);
+      const avg = average(vals);
+      const pts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+      const last = vals.length - 1;
+      chartGeom = { races, x, y, L, R, W };
+      setHTML(
+        svg,
+        `
+        <line x1="${L}" x2="${W - R}" y1="${y(hi)}" y2="${y(hi)}" stroke="#2b3762" stroke-width="1"/>
+        <line x1="${L}" x2="${W - R}" y1="${y(lo)}" y2="${y(lo)}" stroke="#2b3762" stroke-width="1"/>
+        <text x="${L - 6}" y="${y(hi) + 4}" text-anchor="end" fill="#8e9cc9" font-size="10">${hi}</text>
+        <text x="${L - 6}" y="${y(lo) + 4}" text-anchor="end" fill="#8e9cc9" font-size="10">${lo}</text>
+        <line x1="${L}" x2="${W - R}" y1="${y(avg)}" y2="${y(avg)}" stroke="#8e9cc9" stroke-width="1" stroke-dasharray="3 4"/>
+        <text x="${L + 4}" y="${y(avg) - 4}" text-anchor="start" fill="#8e9cc9" font-size="10">avg ${fmt(avg)}</text>
+        <polyline points="${pts}" fill="none" stroke="${LINE}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="${x(last)}" cy="${y(vals[last])}" r="4" fill="${LINE}" stroke="#1c2547" stroke-width="2"/>
+        <line class="cross" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="#8e9cc9" stroke-width="1" visibility="hidden"/>
+        <circle class="hover-dot" r="4" fill="${LINE}" stroke="#1c2547" stroke-width="2" visibility="hidden"/>`,
+      );
+    }
+
+    // Hover anywhere on the chart: crosshair on the nearest race + tooltip.
+    $(".chart").addEventListener("pointermove", (e) => {
+      if (!chartGeom) return;
+      const { races, x, y, L, R, W } = chartGeom;
+      const rect = $(".chart").getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const i = Math.max(0, Math.min(races.length - 1, Math.round(((px - L) / (W - L - R)) * (races.length - 1))));
+      const r = races[i];
+      const cx = x(i);
+      const cy = y(wpmOf(r));
+      const cross = $(".cross");
+      cross.setAttribute("x1", cx);
+      cross.setAttribute("x2", cx);
+      cross.setAttribute("visibility", "visible");
+      const dot = $(".hover-dot");
+      dot.setAttribute("cx", cx);
+      dot.setAttribute("cy", cy);
+      dot.setAttribute("visibility", "visible");
+      const tip = $(".chart .tip");
+      tip.textContent = `${fmt(wpmOf(r))} WPM${r.official ? "" : " (est.)"} · ${fmt(accOf(r), 1)}% · ${timeAgo(r.at)}`;
+      tip.style.display = "block";
+      tip.style.left = `${Math.max(70, Math.min(W - 70, cx))}px`;
+      tip.style.top = `${cy - 6}px`;
+    });
+    $(".chart").addEventListener("pointerleave", () => {
+      $(".chart .tip").style.display = "none";
+      $(".cross")?.setAttribute("visibility", "hidden");
+      $(".hover-dot")?.setAttribute("visibility", "hidden");
+    });
+
+    const ordinal = (n) => (n % 100 >= 11 && n % 100 <= 13 ? `${n}th` : `${n}${["th", "st", "nd", "rd"][n % 10] ?? "th"}`);
+    const sum = (xs) => xs.reduce((a, b) => a + b, 0);
 
     function renderStats() {
       const st = session.stats;
+      const money = st.map((r) => r.official?.money).filter(Number.isFinite);
+      const xp = st.map((r) => r.official?.xp).filter(Number.isFinite);
       $(".s-races").textContent = st.length;
-      $(".s-wpm").textContent = fmt(average(st.map((r) => r.wpm)));
-      $(".s-acc").textContent = st.length ? `${fmt(average(st.map((r) => r.accuracy)), 1)}%` : "–";
-      $(".s-best").textContent = st.length ? fmt(Math.max(...st.map((r) => r.wpm))) : "–";
+      $(".s-wpm").textContent = fmt(average(st.map(wpmOf)));
+      $(".s-acc").textContent = st.length ? `${fmt(average(st.map(accOf)), 1)}%` : "–";
+      $(".s-best").textContent = st.length ? fmt(Math.max(...st.map(wpmOf))) : "–";
+      $(".s-money").textContent = money.length ? `$${sum(money).toLocaleString()}` : "–";
+      $(".s-xp").textContent = xp.length ? sum(xp).toLocaleString() : "–";
+      renderChart();
       const rows = st.slice(-25).reverse();
-      setHTML($(".history"), rows.length
-        ? rows
-            .map(
-              (r) =>
-                `<tr><td>${timeAgo(r.at)}</td><td>${fmt(r.wpm)}</td><td>${r.target ?? "–"}</td><td>${fmt(r.accuracy, 1)}%</td><td>${r.nitros ?? 0}</td></tr>`,
-            )
-            .join("")
-        : `<tr><td colspan="5" class="empty">No races yet</td></tr>`);
+      setHTML(
+        $(".history"),
+        rows.length
+          ? rows
+              .map((r) => {
+                const est = r.official ? "" : "~";
+                const tip = `target ${r.target ?? "?"} WPM, ${r.accTarget ?? "?"}%` + (r.official?.money ? `, $${r.official.money}` : "") + (r.official?.xp ? `, ${r.official.xp} XP` : "");
+                return `<tr title="${tip}"><td>${timeAgo(r.at)}</td><td>${est}${fmt(wpmOf(r))}</td><td>${est}${fmt(accOf(r), 1)}%</td><td>${r.official?.place ? ordinal(r.official.place) : "–"}</td><td>${r.nitros ?? 0}</td></tr>`;
+              })
+              .join("")
+          : `<tr><td colspan="5" class="empty">No races yet</td></tr>`,
+      );
+      $(".footnote").textContent = rows.some((r) => !r.official)
+        ? "~ = the script's own estimate (Nitro Type's results weren't found on screen)."
+        : "";
     }
 
     fillSettings();

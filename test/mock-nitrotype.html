@@ -54,6 +54,8 @@
         let untrusted = 0;
         let earlyKeys = 0;
 
+        // Like Nitro Type's header: WPM and accuracy that are NOT race results.
+        document.write(`<div class="profile-stats"><span>Avg Speed</span> <b>88 WPM</b> <span>Acc</span> <b>96%</b></div>`);
         document.write(`<div class="dash"><div class="dash-copy"></div><input class="dash-copy-input" autocomplete="off"></div><div id="after"></div>`);
         const copy = document.querySelector(".dash-copy");
         const input = document.querySelector(".dash-copy-input");
@@ -140,6 +142,18 @@
           };
           window.__results.push(result);
           sessionStorage.setItem("mock-results", JSON.stringify(window.__results));
+          // The results screen, roughly like Nitro Type's.
+          const place = 1 + (raceNo % 3);
+          const box = document.createElement("div");
+          box.className = "race-results";
+          box.innerHTML = `<div class="place"><b>${place}</b><sup>${["st", "nd", "rd"][place - 1]}</sup> Place</div>
+            <div class="stat"><span class="v">${Math.round(result.wpm)}</span> <span class="k">WPM</span></div>
+            <div class="stat"><span class="v">${result.accuracy.toFixed(1)}%</span> <span class="k">Accuracy</span></div>
+            <div class="stat"><span class="v">$1,${String(200 + raceNo).padStart(3, "0")}</span> <span class="k">Money</span></div>
+            <div class="stat"><span class="v">+${500 + raceNo}</span> <span class="k">XP</span></div>`;
+          result.shown = { place, wpm: Math.round(result.wpm), money: 1200 + raceNo, xp: 500 + raceNo };
+          sessionStorage.setItem("mock-results", JSON.stringify(window.__results));
+          setTimeout(() => after.prepend(box), 600);
           if (!noAgain) {
             const btn = document.createElement("button");
             btn.textContent = "Race Again";

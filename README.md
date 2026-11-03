@@ -6,11 +6,15 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
 
 - **Speed range**: set a min and max WPM, and each race picks a random target inside it. Speed is checked against real progress on every key, so each race lands close to its target.
 - **Human rhythm**: slower on capitals, numbers, punctuation and the first letter of each word; faster on double letters and common pairs like "th" and "er"; a warm-up at the start, a push at the end, and the odd short pause between words. Timing variation adds random gaps on top.
-- **Target accuracy** (80–100%), with three kinds of typo: a neighbouring key, the next letter too early, or the previous key again. Like a person, it pauses and then presses the right key.
+- **Accuracy range** (80–100%): each race picks its own accuracy inside the range. Three kinds of typo: a neighbouring key, the next letter too early, or the previous key again. Like a person, it pauses and then presses the right key.
 - **Nitros**: uses the number you choose per race on the longest words. If you run out, it just types the word.
-- **Multi-race sessions**: set *Races to run*, press Start, and it types every race, clicks "Race Again" after a short random break, and stops when it's done. If there's no button, it reloads the race page.
-- **Session stats**: race count, average and best WPM, average accuracy, and a history of recent races (WPM, target, accuracy, nitros). Saved between visits.
-- **Panel**: drag it by the header, resize it from the corner, collapse it with ▾, and make it see-through when you're not hovering. It remembers all of this. It also shows live progress: a progress bar, the target, the current WPM and races done.
+- **Multi-race sessions**: set *Races to run*, press Start, and it types every race, clicks "Race Again" after a short random pause, and stops when it's done. If there's no button, it reloads the race page.
+- **Long breaks**: optionally take a 1–3 minute (or whatever you set) break roughly every N races. The count varies a little each time. A countdown shows in the panel and the tab title (`❚❚ 8/20 · …`).
+- **Stats with Nitro Type's own results**: after each race it reads Nitro Type's results screen (WPM, accuracy, place, money, XP) and uses those numbers. If it can't find them, it falls back to its own estimate, marked with `~`. Cards for races, average/best WPM, average accuracy, total money and XP; a history table; and a **chart** of WPM per race (hover a point for details). Saved between visits.
+- **Desktop notifications**: get a notification when a session ends, if you're not looking at the tab (turn it on in the Panel tab).
+- **Panel**: drag it by the header, resize it from the corner, collapse it with ▾, switch to **compact mode** with ⊟ (just the status, a progress bar and Start/Stop), and make it see-through when you're not hovering. It remembers all of this. It also shows live progress: a progress bar, the target, the current WPM and races done.
+- **Debug view**: shows what the script sees on the page (race text, position, letter classes, keys sent, nitros, the Race Again button, Nitro Type's results, timer mode). **Copy debug info** puts it on your clipboard to send over when something breaks.
+- **Auto-update**: Tampermonkey checks GitHub for new versions and updates the script by itself.
 - **Controls**: `Alt+Shift+A` starts and stops it, and pressing any key yourself stops the whole session at once.
 - **Runs in a background tab**: start it, switch to another tab, and it keeps typing at full speed. The tab title shows progress (`▶ 2/5 · …`), then `✓ Done: 5 races · …` when it's finished.
 
@@ -26,16 +30,18 @@ Start a session, then switch to another tab or window. It keeps going: all of it
 ## Install
 
 1. Install Tampermonkey. On Chrome, open the Tampermonkey card in `chrome://extensions` → **Details**, and turn on **Allow User Scripts** (older Chrome versions need **Developer mode** on instead).
-2. Tampermonkey icon → **Create a new script…**, delete the template, paste in all of [`nitrotype-autotyper.user.js`](nitrotype-autotyper.user.js), and save (`Ctrl+S`).
+2. Open this link: **[install the script](https://raw.githubusercontent.com/ZillaFam/Nitrotype-autotyper/HEAD/nitrotype-autotyper.user.js)**. Tampermonkey shows an install page; click **Install** (or **Update** if you already had it).
 3. Open nitrotype.com. The **NT Autotyper** panel appears at the bottom left.
 
-To update, paste the new version over the old one in the Tampermonkey editor. Your settings and stats are kept.
+**Updates are automatic** from then on: Tampermonkey checks the link above about once a day. To check right away: Tampermonkey icon → **Utilities** → **Check for userscript updates**. Your settings and stats are kept.
+
+If you had pasted an older version in by hand, open the install link once; Tampermonkey recognises it as the same script and updates it in place.
 
 ## Use
 
-1. On the **Race** tab, set the speed range, accuracy, nitros per race and races to run.
+1. On the **Race** tab, set the speed and accuracy ranges, nitros per race, races to run, and long breaks if you want them.
 2. Press **Start** (or `Alt+Shift+A`) on the race page. It waits for GO, types, and moves on to the next race until the count is done.
-3. The **Stats** tab shows how it went. The **Panel** tab has opacity and a reset for position and size.
+3. The **Stats** tab shows how it went. The **Panel** tab has opacity, a reset for position and size, notifications, and the debug view.
 
 ## How it works
 
@@ -48,10 +54,13 @@ To update, paste the new version over the old one in the Tampermonkey editor. Yo
 
 ## Troubleshooting
 
+- **First, turn on the debug view** (Panel tab) and press **Copy debug info**. It shows exactly what the script found on the page, which usually pinpoints the problem.
 - **"Waiting for the race to start…" forever, or "Can't read the race progress".** Nitro Type has probably renamed its letter classes. Inspect a letter in DevTools and update `readRace()` (the console logs `[NT Autotyper] letter classes: …` at verbose level).
 - **Nitros never fire.** The script presses Enter at the start of a word. If Nitro Type changed the nitro key, update the `pressKey("\n")` call in the engine.
 - **It doesn't go to the next race.** It looks for a button labelled "Race Again", "Next Race", "Play Again" or "New Race", and reloads the page if it can't find one within about 12 seconds. If Nitro Type's button says something else, add it to `findRaceAgainButton()`.
 - **Panel says "Loaded late, so it may not type".** Tampermonkey ran the script after the page had loaded, so it couldn't get in ahead of Nitro Type. Tampermonkey Dashboard → Settings (set Config mode to Advanced if you can't see it) → **Content Script API** → **UserScripts API Dynamic**, then reload the page. It's the only mode with real document-start support in Chrome.
+- **Stats show `~` estimates instead of Nitro Type's results.** The script looks for a small block of text after the finish that mentions both "WPM" and accuracy. The debug view's `results:` line shows whether it found one. If Nitro Type's results screen is worded differently, send the debug info and a screenshot of the results.
+- **No notifications.** Allow notifications for nitrotype.com (padlock icon in the address bar → Notifications → Allow), then turn the setting off and on again.
 - **Nothing types at all.** Check that Tampermonkey's Content Script API setting is "UserScripts API Dynamic" (see above). If the race is in an iframe on a domain other than `nitrotype.com`, add a `// @match` line for it.
 
 ## Fair use
@@ -60,11 +69,11 @@ Bots break Nitro Type's rules. Accounts with bot-like stats get flagged, have th
 
 ## Development
 
-`test/mock-nitrotype.html` is a stand-in race page. It rejects untrusted events, has a countdown, stays on a letter after a mistake, supports nitros on Enter, and shows a "Race Again" button (or none, with `?again=none`). It can listen through `keypress`, `keydown`, `document.onkeypress` or `input` events, and run inside an iframe. The end-to-end test serves it at `https://www.nitrotype.com/race`, injects the userscript at document-start like Tampermonkey, and checks speed, the WPM range, accuracy, nitros, multi-race sessions (button and reload), stats, a simulated background tab (page timers throttled to 1 second, page hidden), the fallback when workers are blocked, the shortcut, the safety stop, and dragging and collapsing the panel:
+`test/mock-nitrotype.html` is a stand-in race page. It rejects untrusted events, has a countdown, stays on a letter after a mistake, supports nitros on Enter, and shows a "Race Again" button (or none, with `?again=none`). It can listen through `keypress`, `keydown`, `document.onkeypress` or `input` events, and run inside an iframe. The end-to-end test serves it at `https://www.nitrotype.com/race`, injects the userscript at document-start like Tampermonkey, and checks speed, the WPM and accuracy ranges, nitros, multi-race sessions (button and reload), long breaks, reading the results screen (and ignoring a profile "average WPM" widget), stats and the chart, a simulated background tab (page timers throttled to 1 second, page hidden) with a desktop notification, the fallback when workers are blocked, the auto-update header, the shortcut, the safety stop, the debug view, compact mode, and dragging and collapsing the panel:
 
 ```bash
 npm install
 npx playwright install chromium
-npm test            # all cases (about 3 minutes)
+npm test            # all cases (about 4 minutes)
 ONLY=nitros npm test  # just the cases whose name contains "nitros"
 ```
