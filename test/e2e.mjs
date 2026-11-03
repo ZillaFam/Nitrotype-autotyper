@@ -34,7 +34,7 @@ async function open(query, settings, ui, before) {
       localStorage.setItem("nt-autotyper-settings", JSON.stringify(s));
       if (u) localStorage.setItem("nt-autotyper-ui", JSON.stringify(u));
     },
-    [settings, ui],
+    [settings, ui ?? { advanced: true }],
   );
   if (before) await context.addInitScript(before);
   await context.addInitScript({ content: script });
@@ -308,6 +308,74 @@ try {
     check(`${name}: no script errors`, errors.length === 0, errors.join(" | "));
     check(`${name}: panel shows up`, await page.locator(".go").isVisible());
     check(`${name}: warns it loaded late`, (await status(page)).startsWith("Loaded late"), await status(page));
+    await context.close();
+  });
+
+  await test("simple mode (default) and the Advanced switch", async (name) => {
+    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 150, wpmMax: 150 }, {});
+    const visible = (sel) => page.locator(sel).first().isVisible();
+    check(
+      `${name}: simple shows speed, accuracy, nitros, races, track, Start`,
+      (await visible('input[type=number][data-k="wpmMin"]')) && (await visible('input[type=number][data-k="accMax"]')) &&
+        (await visible('input[data-k="nitros"]')) && (await visible('input[data-k="races"]')) && (await visible(".track")) && (await visible(".go")),
+    );
+    check(
+      `${name}: simple hides tabs, sliders, timing variation, breaks`,
+      !(await visible(".box nav")) && !(await visible('input[type=range][data-k="wpmMin"]')) && !(await visible('[data-k="variance"]')) && !(await visible('[data-k="breakEvery"]')),
+    );
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-simple.png") });
+
+    // The car drives along the track during the race.
+    await page.locator(".go").click();
+    await page.waitForTimeout(2500);
+    const p1 = Number(await page.locator(".box .track").evaluate((el) => el.style.getPropertyValue("--p")));
+    const x1 = (await page.locator(".box .track .car").boundingBox()).x;
+    await page.waitForTimeout(1500);
+    const p2 = Number(await page.locator(".box .track").evaluate((el) => el.style.getPropertyValue("--p")));
+    const x2 = (await page.locator(".box .track .car").boundingBox()).x;
+    check(`${name}: the car moves along the track`, p2 > p1 && p1 > 0 && x2 > x1, `p ${p1} -> ${p2}, x ${x1.toFixed(0)} -> ${x2.toFixed(0)}`);
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-simple-typing.png") });
+    await waitForResults(page, 1);
+
+    await page.locator(".adv-switch").check({ force: true });
+    check(`${name}: Advanced brings back tabs and every setting`, (await visible(".box nav")) && (await visible('[data-k="variance"]')) && (await visible('[data-k="breakEvery"]')));
+    await page.reload();
+    await page.waitForSelector(".go", { state: "attached" });
+    check(`${name}: Advanced remembered`, await visible(".box nav"));
+    await context.close();
+  });
+
+  await test("focus view", async (name) => {
+    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, races: 2 }, {});
+    await page.locator(".focus-btn").click();
+    const box = await page.locator(".focus").boundingBox();
+    check(`${name}: covers the whole window`, box && box.width === 1200 && box.height === 800, JSON.stringify(box));
+    if (shotDir) await page.screenshot({ path: path.join(shotDir, "focus-idle.png") });
+
+    await page.locator(".f-go").click();
+    await page.waitForTimeout(3000);
+    const num = Number(await page.locator(".f-num").textContent());
+    check(`${name}: big live WPM while typing`, num > 60 && num < 200, String(num));
+    check(`${name}: shows the race count`, (await page.locator(".f-count").textContent()) === "race 1 of 2", await page.locator(".f-count").textContent());
+    const p = Number(await page.locator(".f-track").evaluate((el) => el.style.getPropertyValue("--p")));
+    check(`${name}: track shows progress`, p > 0 && p < 1, String(p));
+    if (shotDir) await page.screenshot({ path: path.join(shotDir, "focus-typing.png") });
+
+    const typed = () => page.evaluate(() => document.querySelectorAll(".is-typed").length);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    const t1 = await typed();
+    await page.waitForTimeout(800);
+    check(`${name}: Esc closes it`, !(await page.locator(".focus").isVisible()));
+    check(`${name}: ...without stopping the typing`, (await typed()) > t1 && (await page.locator(".go").textContent()) === "Stop");
+
+    await page.locator(".focus-btn").click();
+    await page.mouse.click(600, 120); // background, not a button
+    check(`${name}: clicking the background closes it`, !(await page.locator(".focus").isVisible()));
+    await page.locator(".focus-btn").click();
+    await page.keyboard.press("x");
+    await page.waitForTimeout(400);
+    check(`${name}: any other key still stops typing`, (await page.locator(".f-go").textContent()) === "Start", await page.locator(".f-status").textContent());
     await context.close();
   });
 

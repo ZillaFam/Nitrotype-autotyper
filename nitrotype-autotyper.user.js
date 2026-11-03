@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.0.1
+// @version      3.1.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.0.1";
+  const VERSION = "3.1.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -903,6 +903,11 @@
         toTop({ kind: "toggle" });
         return;
       }
+      if (e.key === "Escape" && engine.focusOpen) {
+        // Esc only closes the focus view; it doesn't stop the typing.
+        toTop({ kind: "closeFocus" });
+        return;
+      }
       if (!engine.running) return;
       const path = e.composedPath();
       if (panelHost && path.includes(panelHost) && path[0].tagName === "INPUT") return; // editing a setting
@@ -940,6 +945,7 @@
 
   function engineHandle(msg) {
     if (msg.settings) engine.settings = msg.settings;
+    if (typeof msg.focus === "boolean") engine.focusOpen = msg.focus;
     if (typeof msg.armed === "boolean") engine.setArmed(msg.armed);
     if (msg.cmd === "next") engine.nextRace();
     if (msg.cmd === "reload") engine.reloadRace();
@@ -1204,6 +1210,9 @@
         session.debug.set(source, { ...msg.info, at: Date.now() });
         panel.renderDebug?.();
         break;
+      case "closeFocus":
+        panel.closeFocus?.();
+        break;
       case "say":
         if (session.state.active) session.say(msg.message);
         break;
@@ -1269,7 +1278,7 @@
     .box {
       --bg: #141b33; --bg2: #1c2547; --line: #2b3762; --text: #e8edff; --sub: #8e9cc9;
       --accent: #f5a623; --good: #3ddc84; --bad: #ff5c6c;
-      position: fixed; display: flex; flex-direction: column;
+      position: fixed; z-index: 1; display: flex; flex-direction: column;
       min-width: 250px; max-width: 520px; min-height: 44px;
       background: var(--bg); color: var(--text);
       border: 1px solid var(--line); border-radius: 14px;
@@ -1297,8 +1306,34 @@
     .live { padding: 10px 12px 8px; border-bottom: 1px solid var(--line); flex: none; }
     .status { color: var(--sub); overflow-wrap: anywhere; }
     .running .status { color: var(--text); }
-    .bar { height: 6px; margin: 8px 0 6px; background: var(--bg2); border-radius: 99px; overflow: hidden; }
-    .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #ffd36b); transition: width .2s; }
+    /* mini track: a lane, a car that drives to the checkered finish, a trail */
+    .track {
+      --car-w: 30px; --p: 0;
+      position: relative; height: 24px; margin: 8px 0 6px; border-radius: 8px;
+      background: var(--bg2); overflow: hidden;
+    }
+    .track::before {
+      content: ""; position: absolute; left: 8px; right: 16px; top: 50%;
+      border-top: 2px dashed rgba(142, 156, 201, .22);
+    }
+    .track .finish {
+      position: absolute; right: 0; top: 0; bottom: 0; width: 8px; opacity: .65;
+      background: repeating-conic-gradient(#e8edff 0 25%, #141b33 0 50%) 0 0 / 8px 8px;
+    }
+    .track .trail {
+      position: absolute; left: 0; top: 0; bottom: 0;
+      width: calc((100% - var(--car-w) - 16px) * var(--p) + var(--car-w) / 2);
+      background: linear-gradient(90deg, transparent, rgba(245, 166, 35, .22));
+      transition: width .25s linear;
+    }
+    .track .car {
+      position: absolute; top: 50%; transform: translateY(-50%); line-height: 0;
+      left: calc(4px + (100% - var(--car-w) - 16px) * var(--p));
+      color: var(--accent); transition: left .25s linear;
+    }
+    .track .car svg { width: var(--car-w); height: calc(var(--car-w) * 14 / 30); }
+    .box:not(.running) .track .car { color: #6b7aa8; }
+    .running .track .car { filter: drop-shadow(0 0 4px rgba(245, 166, 35, .45)); }
     .chips { display: flex; gap: 6px; flex-wrap: wrap; }
     .chip { background: var(--bg2); border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; font-size: 11.5px; color: var(--sub); }
     .chip b { color: var(--text); font-weight: 600; }
@@ -1329,7 +1364,65 @@
     }
     .go:hover { filter: brightness(1.08); }
     .running .go { background: var(--bad); color: #fff; }
-    .foot { color: var(--sub); font-size: 11px; text-align: center; padding: 0 8px 10px; flex: none; }
+    .foot {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      color: var(--sub); font-size: 11px; padding: 0 12px 10px; flex: none;
+    }
+    .switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11.5px; position: relative; }
+    .switch input { position: absolute; opacity: 0; pointer-events: none; }
+    .switch .knob { width: 26px; height: 14px; border-radius: 99px; background: var(--line); position: relative; transition: background .15s; }
+    .switch .knob::after {
+      content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%;
+      background: var(--sub); transition: transform .15s, background .15s;
+    }
+    .switch input:checked + .knob { background: rgba(245, 166, 35, .35); }
+    .switch input:checked + .knob::after { transform: translateX(12px); background: var(--accent); }
+    .switch input:focus-visible + .knob { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* simple mode: just the essentials */
+    .box.simple { resize: horizontal; height: auto !important; }
+    .simple nav, .simple .adv, .simple section { display: none !important; }
+    .simple section[data-tab="race"] { display: flex !important; }
+    .simple .tabs { border-radius: 10px; margin-top: 8px; flex: none; }
+    .simple .chips { display: none; }
+    /* focus view: full screen and mellow */
+    .focus {
+      position: fixed; inset: 0; z-index: 2; display: flex; flex-direction: column;
+      color: #dfe3ee; font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(1100px 700px at 25% 15%, rgba(68, 84, 140, .45), transparent 60%),
+        radial-gradient(900px 650px at 85% 95%, rgba(96, 74, 120, .35), transparent 55%),
+        #161a26;
+      background-size: 140% 140%, 140% 140%, auto;
+      animation: drift 30s ease-in-out infinite alternate;
+    }
+    .focus[hidden] { display: none; }
+    @keyframes drift { from { background-position: 0% 0%, 100% 100%, 0 0; } to { background-position: 100% 60%, 0% 40%, 0 0; } }
+    .f-top { display: flex; align-items: center; gap: 10px; padding: 18px 24px; color: #8f98b3; font-size: 13px; letter-spacing: .03em; }
+    .f-brand { font-weight: 600; }
+    .f-count { flex: 1; }
+    .f-btn { all: unset; cursor: pointer; padding: 6px 10px; border-radius: 8px; color: #8f98b3; font-size: 15px; }
+    .f-btn:hover, .f-btn:focus-visible { background: rgba(255, 255, 255, .06); color: #dfe3ee; }
+    .f-center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 0 24px; text-align: center; }
+    .f-status { color: #8f98b3; font-size: 14px; letter-spacing: .04em; }
+    .f-wpm { display: flex; align-items: baseline; gap: 12px; }
+    .f-num { font-size: clamp(72px, 15vw, 168px); font-weight: 200; line-height: 1; color: #eef0f6; font-variant-numeric: tabular-nums; }
+    .f-unit { font-size: 20px; color: #8f98b3; letter-spacing: .12em; }
+    .f-sub { color: #8f98b3; font-size: 14px; min-height: 21px; }
+    .track.f-track { --car-w: 48px; width: min(720px, 88vw); height: 44px; margin: 22px 0 14px; border-radius: 14px; background: rgba(255, 255, 255, .04); }
+    .f-track .car { color: #e3b673; }
+    .f-track .trail { background: linear-gradient(90deg, transparent, rgba(227, 182, 115, .16)); }
+    .f-track .finish { width: 10px; background-size: 10px 10px; opacity: .45; }
+    .f-go {
+      all: unset; cursor: pointer; padding: 10px 30px; border-radius: 999px; font-weight: 600; letter-spacing: .04em;
+      border: 1px solid rgba(227, 182, 115, .5); color: #e3b673;
+    }
+    .f-go:hover, .f-go:focus-visible { background: rgba(227, 182, 115, .1); }
+    .focus.running .f-go { border-color: rgba(229, 143, 143, .5); color: #e58f8f; }
+    .f-hint { text-align: center; color: #646d88; font-size: 12px; padding: 18px; }
+    @media (prefers-reduced-motion: reduce) {
+      .focus { animation: none; }
+      .track .car, .track .trail { transition: none; }
+    }
     .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
     .card { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
     .card .k { color: var(--sub); font-size: 11px; }
@@ -1371,7 +1464,7 @@
     .compact .main { flex: none; }
     .compact .live { padding: 8px 12px 6px; border-bottom: 0; }
     .compact .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .compact .bar { margin: 6px 0 4px; }
+    .compact .track { height: 20px; margin: 6px 0 4px; --car-w: 26px; }
     .compact .chips { flex-wrap: nowrap; overflow: hidden; }
     .compact .go { padding: 6px; margin: 2px 8px 8px; }
   `;
@@ -1381,13 +1474,14 @@
       <header>
         <span class="dot"></span>
         <span class="title">NT Autotyper<small class="count"></small></span>
+        <button class="icon focus-btn" title="Focus view (full screen)">⛶</button>
         <button class="icon compact-btn" title="Compact mode">⊟</button>
         <button class="icon collapse" title="Collapse">▾</button>
       </header>
       <div class="main">
         <div class="live">
           <div class="status">Idle</div>
-          <div class="bar"><i></i></div>
+          <div class="track"><div class="trail"></div><div class="finish"></div><div class="car"><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M2.5 10.5V9.4Q3 8 4.4 7.6L6.2 4.8Q7.1 3.5 8.7 3.5H17Q18.8 3.5 20.1 4.8L22.6 7.3H25.6Q27.8 7.6 28 9.6V10.5Z" fill="currentColor"/><path d="M9.2 5H13V7.3H7.8ZM14.4 5H17.2Q18 5 18.6 5.6L20.1 7.3H14.4Z" fill="#0f1426" opacity=".55"/><circle cx="8.3" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/><circle cx="22" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/></svg></div></div>
           <div class="chips"></div>
           <pre class="debug"></pre>
         </div>
@@ -1403,19 +1497,19 @@
               <div class="range2">
                 <input type="number" data-k="wpmMin" min="10" max="300"><span>to</span><input type="number" data-k="wpmMax" min="10" max="300">
               </div>
-              <div class="row" style="margin-top:6px"><input type="range" data-k="wpmMin" min="10" max="300"></div>
-              <div class="row"><input type="range" data-k="wpmMax" min="10" max="300"></div>
-              <div class="hint">Each race picks a random speed in this range.</div>
+              <div class="row adv" style="margin-top:6px"><input type="range" data-k="wpmMin" min="10" max="300"></div>
+              <div class="row adv"><input type="range" data-k="wpmMax" min="10" max="300"></div>
+              <div class="hint adv">Each race picks a random speed in this range.</div>
             </div>
             <div class="field">
               <div class="lbl">Accuracy range <b class="accLabel"></b></div>
               <div class="range2">
                 <input type="number" data-k="accMin" min="80" max="100" step="0.5"><span>to</span><input type="number" data-k="accMax" min="80" max="100" step="0.5">
               </div>
-              <div class="row" style="margin-top:6px"><input type="range" data-k="accMin" min="80" max="100" step="0.5"></div>
-              <div class="row"><input type="range" data-k="accMax" min="80" max="100" step="0.5"></div>
+              <div class="row adv" style="margin-top:6px"><input type="range" data-k="accMin" min="80" max="100" step="0.5"></div>
+              <div class="row adv"><input type="range" data-k="accMax" min="80" max="100" step="0.5"></div>
             </div>
-            <div class="field">
+            <div class="field adv">
               <div class="lbl">Timing variation <b><span data-show="variance"></span>%</b></div>
               <div class="row"><input type="range" data-k="variance" min="0" max="60"></div>
             </div>
@@ -1423,15 +1517,15 @@
               <div class="field">
                 <div class="lbl">Nitros / race</div>
                 <input type="number" data-k="nitros" min="0" max="10">
-                <div class="hint">Used on the longest words.</div>
+                <div class="hint adv">Used on the longest words.</div>
               </div>
               <div class="field">
                 <div class="lbl">Races to run</div>
                 <input type="number" data-k="races" min="1" max="500">
-                <div class="hint">Clicks "Race Again" in between.</div>
+                <div class="hint adv">Clicks "Race Again" in between.</div>
               </div>
             </div>
-            <div class="field">
+            <div class="field adv">
               <div class="lbl">Long breaks <b class="breakLabel"></b></div>
               <div class="breaks">
                 <span>Every</span><input type="number" data-k="breakEvery" min="0" max="100"><span>races (0 = off)</span>
@@ -1476,12 +1570,32 @@
           </section>
         </div>
         <button class="go">Start</button>
-        <div class="foot">Alt+Shift+A start/stop · pressing any key stops it</div>
+        <div class="foot">
+          <label class="switch" title="Show every setting, plus the Stats and Panel tabs"><input type="checkbox" class="adv-switch"><span class="knob"></span>Advanced</label>
+          <span>Alt+Shift+A · any key stops</span>
+        </div>
       </div>
+    </div>
+    <div class="focus" hidden>
+      <div class="f-top">
+        <span class="f-brand">NT Autotyper</span><span class="f-count"></span>
+        <button class="f-btn f-full" title="Browser full screen">⛶</button>
+        <button class="f-btn f-close" title="Close (Esc)">✕</button>
+      </div>
+      <div class="f-center">
+        <div class="f-status">Idle</div>
+        <div class="f-wpm"><span class="f-num">–</span><span class="f-unit">wpm</span></div>
+        <div class="f-sub"></div>
+        <div class="track f-track"><div class="trail"></div><div class="finish"></div><div class="car"><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M2.5 10.5V9.4Q3 8 4.4 7.6L6.2 4.8Q7.1 3.5 8.7 3.5H17Q18.8 3.5 20.1 4.8L22.6 7.3H25.6Q27.8 7.6 28 9.6V10.5Z" fill="currentColor"/><path d="M9.2 5H13V7.3H7.8ZM14.4 5H17.2Q18 5 18.6 5.6L20.1 7.3H14.4Z" fill="#0f1426" opacity=".55"/><circle cx="8.3" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/><circle cx="22" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/></svg></div></div>
+        <button class="f-go">Start</button>
+      </div>
+      <div class="f-hint">Esc or click outside to close · any other key stops typing</div>
     </div>`;
 
   function buildPanel() {
     panelHost = document.createElement("div");
+    // A zero-size, top-most layer: the panel and focus view sit above the page.
+    panelHost.style.cssText = "position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;";
     const root = panelHost.attachShadow({ mode: "open" });
     setHTML(root, `<style>${PANEL_CSS}</style>${PANEL_HTML}`);
     document.body.appendChild(panelHost);
@@ -1490,7 +1604,7 @@
     const $$ = (sel) => [...root.querySelectorAll(sel)];
     const box = $(".box");
     let settings = loadSettings();
-    const UI_DEFAULTS = { x: 16, y: null, w: 290, h: null, collapsed: false, compact: false, tab: "race", opacity: 100 };
+    const UI_DEFAULTS = { x: 16, y: null, w: 290, h: null, collapsed: false, compact: false, advanced: false, tab: "race", opacity: 100 };
     let ui = { ...UI_DEFAULTS, ...readJSON(localStorage, KEYS.ui, {}) };
     const saveUI = () => writeJSON(localStorage, KEYS.ui, ui);
 
@@ -1507,7 +1621,9 @@
     }
     function applyLayout() {
       box.style.width = `${ui.w}px`;
-      box.style.height = ui.h && !ui.collapsed && !ui.compact ? `${ui.h}px` : "";
+      box.style.height = ui.h && !ui.collapsed && !ui.compact && ui.advanced ? `${ui.h}px` : "";
+      box.classList.toggle("simple", !ui.advanced);
+      $(".adv-switch").checked = ui.advanced;
       box.classList.toggle("collapsed", ui.collapsed);
       box.classList.toggle("compact", ui.compact);
       box.classList.toggle("debugging", settings.debug);
@@ -1542,7 +1658,14 @@
     listen(window, "resize", place);
 
     new ResizeObserver(() => {
-      if (ui.collapsed || ui.compact) return;
+      if (ui.collapsed || ui.compact || !ui.advanced) {
+        // Width can still be changed in these modes; height is automatic.
+        if (!ui.collapsed && Math.round(box.offsetWidth) !== ui.w) {
+          ui.w = Math.round(box.offsetWidth);
+          saveUI();
+        }
+        return;
+      }
       const w = Math.round(box.offsetWidth);
       const h = Math.round(box.offsetHeight);
       if (w !== ui.w || (ui.h !== null && h !== ui.h) || (ui.h === null && box.style.height)) {
@@ -1553,7 +1676,7 @@
     }).observe(box);
     // CSS resize sets an inline height once the user drags the corner.
     new MutationObserver(() => {
-      if (!ui.collapsed && !ui.compact && box.style.height) {
+      if (!ui.collapsed && !ui.compact && ui.advanced && box.style.height) {
         ui.h = Math.round(box.offsetHeight);
         saveUI();
       }
@@ -1564,6 +1687,41 @@
       saveUI();
       applyLayout();
     });
+    $(".adv-switch").addEventListener("change", (e) => {
+      ui.advanced = e.target.checked;
+      saveUI();
+      applyLayout();
+      panel.render();
+    });
+
+    // ---- focus view ----------------------------------------------------------
+    const focusEl = $(".focus");
+    function setFocusView(open) {
+      focusEl.hidden = !open;
+      toEngines({ focus: open }); // so Esc closes it instead of stopping
+      if (!open && document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+      panel.render();
+      focusRace(); // keys go to the race, not our buttons
+    }
+    panel.closeFocus = () => setFocusView(false);
+    panel.focusOpen = () => !focusEl.hidden;
+    $(".focus-btn").addEventListener("click", () => setFocusView(true));
+    $(".f-close").addEventListener("click", () => setFocusView(false));
+    focusEl.addEventListener("click", (e) => {
+      // Click on the background (not a button) closes it.
+      if (!e.target.closest("button")) setFocusView(false);
+    });
+    $(".f-full").addEventListener("click", () => {
+      if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+      else document.documentElement.requestFullscreen?.().catch(() => {});
+      $(".f-full").blur();
+    });
+    $(".f-go").addEventListener("click", () => {
+      session.toggle();
+      $(".f-go").blur();
+      if (session.state.active) focusRace();
+    });
+
     $(".compact-btn").addEventListener("click", () => {
       ui.compact = !ui.compact;
       if (ui.compact) ui.collapsed = false;
@@ -1690,7 +1848,23 @@
       $(".count").textContent = active ? `race ${Math.min(session.state.done + 1, session.state.total)}/${session.state.total}` : "";
 
       const pct = live?.len ? (100 * live.pos) / live.len : live?.done ? 100 : 0;
-      $(".bar > i").style.width = `${active || typing ? pct : 0}%`;
+      const progress = active || typing ? pct / 100 : 0;
+      for (const track of $$(".track")) track.style.setProperty("--p", progress.toFixed(4));
+
+      // focus view
+      if (!focusEl.hidden) {
+        const last = session.stats[session.stats.length - 1];
+        focusEl.classList.toggle("running", active || typing);
+        $(".f-status").textContent = $(".status").textContent;
+        $(".f-num").textContent = typing && Number.isFinite(live.wpm) ? fmt(live.wpm) : last ? fmt(wpmOf(last)) : "–";
+        $(".f-count").textContent = active ? `race ${Math.min(session.state.done + 1, session.state.total)} of ${session.state.total}` : "";
+        $(".f-sub").textContent = typing
+          ? `target ${live.target} wpm`
+          : last
+            ? `last race · ${fmt(accOf(last), 1)}%${last.official?.place ? ` · ${ordinal(last.official.place)}` : ""}`
+            : "";
+        $(".f-go").textContent = active ? "Stop" : "Start";
+      }
       const chips = [];
       if (live?.target && (active || typing)) chips.push(`target <b>${live.target}</b>`);
       if (typing && Number.isFinite(live.wpm)) chips.push(`now <b>${fmt(live.wpm)}</b> WPM`);
