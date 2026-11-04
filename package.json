@@ -1,11 +1,12 @@
 {
   "name": "nitrotype-autotyper",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "private": true,
   "description": "Tampermonkey userscript that autotypes Nitro Type races at a set WPM and accuracy.",
   "type": "module",
   "scripts": {
-    "test": "node test/e2e.mjs"
+    "test": "node test/e2e.mjs",
+    "bench": "node test/bench.mjs"
   },
   "devDependencies": {
     "playwright": "^1.50.0"

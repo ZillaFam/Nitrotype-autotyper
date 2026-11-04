@@ -556,6 +556,22 @@ try {
     await context.close();
   });
 
+  await test("Low-FPS mode", async (name) => {
+    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 150, wpmMax: 150, races: 1, lite: true }, {});
+    check(`${name}: panel in Low-FPS mode`, await page.locator(".box.lite").count() === 1);
+    await page.locator(".go").click();
+    await page.waitForTimeout(2500);
+    check(`${name}: no live standings or track dots`, !(await page.locator(".live-people").isVisible()) && !(await page.locator(".box .rivals").isVisible()));
+    const anims = await page.locator(".box .track .car").evaluate((el) => getComputedStyle(el).transitionDuration);
+    check(`${name}: no animations`, anims === "0s", anims);
+    check(`${name}: status still updates`, (await status(page)) === "Typing…", await status(page));
+    const [r] = await waitForResults(page, 1);
+    check(`${name}: still races normally`, r.correct > 100 && Math.abs(r.wpm - 150) / 150 < 0.1, `wpm ${r.wpm.toFixed(1)}`);
+    await page.waitForTimeout(1500);
+    check(`${name}: result card still shows`, await page.locator(".result-card").isVisible());
+    await context.close();
+  });
+
   await test("controls: stop key, shortcut, drag, collapse", async (name) => {
     const { context, page } = await open("?countdown=300", { ...BASE, wpmMin: 60, wpmMax: 60, races: 3 });
     if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-race.png") });

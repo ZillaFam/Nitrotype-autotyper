@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.3.0
+// @version      3.4.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.3.0";
+  const VERSION = "3.4.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -360,24 +360,43 @@
   // 4. Reading the race
   // =========================================================================
 
-  /** { text, pos, id, firstClass } or null. pos is null when the classes give no clue. */
-  function readRace() {
-    const spans = document.querySelectorAll(".dash-letter");
-    if (!spans.length) return null;
+  // Reading all ~300 letters on every keystroke is wasteful: the text only
+  // changes when a new race shows up. So the text is cached, and each call
+  // just asks the browser (native selectors, fast) where the cursor is.
+  const LETTERS = document.getElementsByClassName("dash-letter"); // live list
+  let letterCache = null;
+  const letterSample = (n) => LETTERS[0].textContent + LETTERS[n >> 1].textContent + LETTERS[n - 1].textContent;
+
+  function buildLetterCache() {
     let text = "";
-    let waiting = -1;
-    let typed = 0;
-    for (const span of spans) {
-      const ch = span.textContent.replace(/ /g, " ");
+    const index = new Map(); // span -> position in the text
+    for (const span of LETTERS) {
+      const ch = span.textContent.replace(/\u00a0/g, " ");
       if (ch.length !== 1) continue; // skips the finish-flag emoji and empties
-      const cls = typeof span.className === "string" ? span.className : "";
-      if (waiting < 0 && /\bis-(waiting|current|active)\b/.test(cls)) waiting = text.length;
-      if (/\bis-(correct|typed)\b/.test(cls)) typed++;
+      index.set(span, text.length);
       text += ch;
     }
+    const n = LETTERS.length;
+    letterCache = { first: LETTERS[0], last: LETTERS[n - 1], count: n, sample: letterSample(n), text, index, at: Date.now() };
+  }
+
+  /** { text, pos, id, firstClass } or null. pos is null when the classes give no clue. */
+  function readRace() {
+    const n = LETTERS.length;
+    if (!n) return null;
+    const c = letterCache;
+    const stale =
+      !c || c.count !== n || c.first !== LETTERS[0] || c.last !== LETTERS[n - 1] || c.sample !== letterSample(n) || Date.now() - c.at > 3000;
+    if (stale) buildLetterCache();
+    const { text, index } = letterCache;
     if (!text) return null;
-    const pos = waiting >= 0 ? waiting : typed > 0 ? typed : null;
-    return { text, pos, id: spans[0], firstClass: spans[0].className };
+    const waiting = document.querySelector(".dash-letter.is-waiting, .dash-letter.is-current, .dash-letter.is-active");
+    let pos = waiting ? index.get(waiting) : undefined;
+    if (pos === undefined) {
+      const typed = document.querySelectorAll(".dash-letter.is-correct, .dash-letter.is-typed").length;
+      pos = typed > 0 ? typed : null;
+    }
+    return { text, pos, id: LETTERS[0], firstClass: LETTERS[0].className };
   }
 
   // Same race = same text. (Not the same <span> elements: Nitro Type may
@@ -429,16 +448,29 @@
     return parts.join(" ").replace(/\s+/g, " ");
   }
 
-  /** Small blocks of text that mention both WPM and accuracy, smallest first. */
+  /**
+   * Small blocks of text that mention both WPM and accuracy, smallest first.
+   * Only looks around text that says "WPM" (instead of reading every element
+   * on the page, which is slow on a big page).
+   */
   function resultCandidates() {
-    const out = [];
-    for (const el of document.querySelectorAll("div, section, table, ul, dl")) {
-      if (el.closest(".dash-copy") || el === panelHost) continue;
-      const raw = el.textContent;
-      if (raw.length > 800 || !/wpm/i.test(raw) || !/acc/i.test(raw)) continue;
-      out.push({ el, text: textOf(el) });
+    if (!document.body) return [];
+    const found = new Map();
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (/wpm/i.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
+    });
+    while (walker.nextNode()) {
+      let el = walker.currentNode.parentElement;
+      if (!el || el.closest(".dash-copy") || el.tagName === "SCRIPT" || el.tagName === "STYLE") continue;
+      for (let depth = 0; el && depth < 6; depth++, el = el.parentElement) {
+        if (el === panelHost || found.has(el)) continue;
+        if (!/^(DIV|SECTION|TABLE|UL|DL)$/.test(el.tagName)) continue;
+        const raw = el.textContent;
+        if (raw.length > 800) break;
+        if (/acc/i.test(raw)) found.set(el, textOf(el));
+      }
     }
-    return out.sort((a, b) => a.text.length - b.text.length);
+    return [...found].map(([el, text]) => ({ el, text })).sort((a, b) => a.text.length - b.text.length);
   }
 
   const toNumber = (str) => (str === undefined ? undefined : Number(str.replace(/,/g, "")));
@@ -579,20 +611,39 @@
   // reCAPTCHA iframe) that some pages always show.
   const CAPTCHA_FRAME = /recaptcha|hcaptcha|challenges\.cloudflare\.com|turnstile|arkoselabs|funcaptcha/i;
   const CAPTCHA_TEXT = /i'?m not a robot|verify (?:that )?you(?:'re| are) (?:a )?human|complete the (?:captcha|security check)/i;
-  let captchaCheck = { at: 0, seen: false };
-  function captchaShowing() {
+  // Popups and captchas live in dialogs, modals and captcha widgets. Reading
+  // the whole page's text instead (innerText) forces the browser to lay out
+  // the entire page, which costs frames, so only these are read, and at most
+  // every 1.5 s.
+  const POPUP_SELECTOR =
+    '.modal, [role="dialog"], [role="alertdialog"], [aria-modal="true"], [class*="modal" i], [class*="popup" i], [class*="captcha" i], [id*="captcha" i], [class*="challenge" i]';
+  let popupScan = { at: 0, captcha: false, stuck: false };
+  function scanPopups() {
     const now = Date.now();
-    if (now - captchaCheck.at < 1000) return captchaCheck.seen;
-    let seen = [...document.querySelectorAll("iframe")].some((f) => {
+    if (now - popupScan.at < 1500) return popupScan;
+    let captcha = false;
+    for (const f of document.getElementsByTagName("iframe")) {
       const src = f.getAttribute("src") || "";
-      if (!CAPTCHA_FRAME.test(src) || /size=invisible/.test(src)) return false;
+      if (!CAPTCHA_FRAME.test(src) || /size=invisible/.test(src)) continue;
       const r = f.getBoundingClientRect();
-      return r.width > 30 && r.height > 30;
-    });
-    if (!seen && document.body) seen = CAPTCHA_TEXT.test(document.body.innerText);
-    captchaCheck = { at: now, seen };
-    return seen;
+      if (r.width > 30 && r.height > 30) captcha = true;
+    }
+    let stuck = false;
+    for (const el of document.querySelectorAll(POPUP_SELECTOR)) {
+      if (el === panelHost || el.closest(".dash-copy")) continue;
+      const text = el.textContent;
+      const isCaptcha = !captcha && CAPTCHA_TEXT.test(text);
+      const isStuck = !stuck && /currently in a race/i.test(text);
+      // Only now check it's actually showing (hidden templates don't count).
+      if ((isCaptcha || isStuck) && el.getClientRects().length) {
+        captcha ||= isCaptcha;
+        stuck ||= isStuck;
+      }
+    }
+    popupScan = { at: now, captcha, stuck };
+    return popupScan;
   }
+  const captchaShowing = () => scanPopups().captcha;
 
   /** Your level and season-pass tier, if Nitro Type's race state has them. */
   function readProgress() {
@@ -609,15 +660,8 @@
    * and have to wait until it disqualifies you. Returns its "Try Again"
    * button (or null if the popup has none), or undefined when there's no popup.
    */
-  let stuckCheck = { at: 0, seen: false };
   function findStuckPopup() {
-    // Visible text only (innerText skips <script> contents, which can contain
-    // the same words), and at most once a second since it's not cheap.
-    const now = Date.now();
-    if (now - stuckCheck.at > 1000) {
-      stuckCheck = { at: now, seen: Boolean(document.body && /currently in a race/i.test(document.body.innerText)) };
-    }
-    if (!stuckCheck.seen) return undefined;
+    if (!scanPopups().stuck) return undefined;
     const buttons = [...document.querySelectorAll("button, a, [role=button]")];
     return buttons.find((b) => /try again/i.test(b.textContent) && b.getClientRects().length) ?? null;
   }
@@ -899,7 +943,7 @@
           continue;
         }
 
-        if (now - this.lastLiveAt > 250) {
+        if (now - this.lastLiveAt > (this.settings.lite ? 1000 : 250)) {
           this.lastLiveAt = now;
           const liveWpm = (pos - skipped) / 5 / ((now - startedAt) / 60000);
           this.status("Typing…", { target, pos, len: text.length, wpm: liveWpm, nitros: nitrosUsed, racers: readRacers() });
@@ -1163,8 +1207,9 @@
     // which notifications (all need "notify" on)
     notifyRace: true, notifyLevel: true, notifySeason: true, notifySession: true, notifyMilestone: true, notifyCaptcha: true,
     stopOnLock: false, // stop the session when the computer's screen locks
+    lite: false, // Low-FPS mode: fewer panel updates, no animations
   };
-  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock"];
+  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite"];
   const LIMITS = {
     wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
     nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
@@ -1573,7 +1618,10 @@
   } catch {
     /* policy name not allowed; plain strings it is */
   }
+  // Rebuilding unchanged markup still costs style and layout work, so skip it.
   const setHTML = (el, markup) => {
+    if (el.__ntaMarkup === markup) return;
+    el.__ntaMarkup = markup;
     el.innerHTML = htmlPolicy ? htmlPolicy.createHTML(markup) : markup;
   };
 
@@ -1601,6 +1649,7 @@
       font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
       overflow: hidden; resize: both;
       opacity: var(--idle-opacity, 1); transition: opacity .15s;
+      contain: layout paint style; /* our updates never re-lay-out the page */
     }
     .box:hover, .box.running { opacity: 1; }
     .box.collapsed { resize: none; height: auto !important; min-height: 0; }
@@ -1624,8 +1673,10 @@
     /* mini track: a lane, a car that drives to the checkered finish, a trail */
     .track {
       --car-w: 30px; --p: 0;
+      /* moving parts use transforms (GPU) sized by the track's width (cqw) */
+      --run: calc(100cqw - var(--car-w) - 16px);
       position: relative; height: 24px; margin: 8px 0 6px; border-radius: 8px;
-      background: var(--bg2); overflow: hidden;
+      background: var(--bg2); overflow: hidden; container-type: inline-size; contain: layout paint style;
     }
     .track::before {
       content: ""; position: absolute; left: 8px; right: 16px; top: 50%;
@@ -1636,22 +1687,22 @@
       background: repeating-conic-gradient(#e8edff 0 25%, #141b33 0 50%) 0 0 / 8px 8px;
     }
     .track .trail {
-      position: absolute; left: 0; top: 0; bottom: 0;
-      width: calc((100% - var(--car-w) - 16px) * var(--p) + var(--car-w) / 2);
+      position: absolute; left: 0; top: 0; bottom: 0; width: calc(100% - var(--car-w) / 2 - 12px);
+      transform-origin: left center; transform: scaleX(var(--p));
       background: linear-gradient(90deg, transparent, rgba(245, 166, 35, .22));
-      transition: width .25s linear;
     }
     .track .car {
-      position: absolute; top: 50%; transform: translateY(-50%); line-height: 0;
-      left: calc(4px + (100% - var(--car-w) - 16px) * var(--p));
-      color: var(--accent); transition: left .25s linear;
+      position: absolute; top: 50%; left: 4px; line-height: 0;
+      transform: translate(calc(var(--run) * var(--p)), -50%);
+      color: var(--accent); transition: transform .25s linear; will-change: transform;
     }
     .track .car svg { width: var(--car-w); height: calc(var(--car-w) * 14 / 30); }
     .box:not(.running) .track .car { color: #6b7aa8; }
     /* other racers: dots riding along the top of the lane */
     .track .rivals i {
-      position: absolute; top: 3px; width: 7px; height: 7px; border-radius: 50%;
-      background: #8e9cc9; transform: translateX(-50%); box-shadow: 0 0 0 2px #1c2547;
+      position: absolute; top: 3px; left: 0; width: 7px; height: 7px; border-radius: 50%;
+      background: #8e9cc9; box-shadow: 0 0 0 2px #1c2547;
+      transform: translateX(calc(4px + var(--run) * var(--rp, 0) + var(--car-w) / 2 - 50%));
     }
     .f-track .rivals i { top: 5px; width: 9px; height: 9px; background: #9aa3bd; box-shadow: 0 0 0 2px #1d2232; }
     /* standings: position, name, progress, WPM */
@@ -1663,7 +1714,7 @@
     .p-wpm { text-align: right; }
     .p-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .p-bar { height: 4px; border-radius: 99px; background: var(--line); overflow: hidden; }
-    .p-bar i { display: block; height: 100%; background: #6b7aa8; transition: width .25s linear; }
+    .p-bar i { display: block; height: 100%; background: #6b7aa8; transform-origin: left center; }
     .p-row.me .p-bar i { background: var(--accent); }
     /* after a race: place badge, your numbers, final standings */
     .result-card {
@@ -1689,7 +1740,6 @@
     .f-people .p-bar { background: rgba(255, 255, 255, .07); }
     .f-people .p-bar i { background: #6f7894; }
     .f-people .p-row.me .p-bar i { background: #e3b673; }
-    .running .track .car { filter: drop-shadow(0 0 4px rgba(245, 166, 35, .45)); }
     .chips { display: flex; gap: 6px; flex-wrap: wrap; }
     .chip { background: var(--bg2); border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; font-size: 11.5px; color: var(--sub); }
     .chip b { color: var(--text); font-weight: 600; }
@@ -1744,15 +1794,19 @@
     .focus {
       position: fixed; inset: 0; z-index: 2; display: flex; flex-direction: column;
       color: #dfe3ee; font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #161a26; overflow: hidden; contain: strict;
+    }
+    /* the soft colours drift as one GPU layer (no repainting every frame) */
+    .focus::before {
+      content: ""; position: absolute; inset: -12%; pointer-events: none; will-change: transform;
       background:
         radial-gradient(1100px 700px at 25% 15%, rgba(68, 84, 140, .45), transparent 60%),
-        radial-gradient(900px 650px at 85% 95%, rgba(96, 74, 120, .35), transparent 55%),
-        #161a26;
-      background-size: 140% 140%, 140% 140%, auto;
-      animation: drift 30s ease-in-out infinite alternate;
+        radial-gradient(900px 650px at 85% 95%, rgba(96, 74, 120, .35), transparent 55%);
+      animation: drift 40s ease-in-out infinite alternate;
     }
+    .focus > * { position: relative; }
     .focus[hidden] { display: none; }
-    @keyframes drift { from { background-position: 0% 0%, 100% 100%, 0 0; } to { background-position: 100% 60%, 0% 40%, 0 0; } }
+    @keyframes drift { from { transform: translate3d(-5%, -4%, 0); } to { transform: translate3d(5%, 4%, 0); } }
     .f-top { display: flex; align-items: center; gap: 10px; padding: 18px 24px; color: #8f98b3; font-size: 13px; letter-spacing: .03em; }
     .f-brand { font-weight: 600; }
     .f-count { flex: 1; }
@@ -1776,9 +1830,12 @@
     .focus.running .f-go { border-color: rgba(229, 143, 143, .5); color: #e58f8f; }
     .f-hint { text-align: center; color: #646d88; font-size: 12px; padding: 18px; }
     @media (prefers-reduced-motion: reduce) {
-      .focus { animation: none; }
+      .focus::before { animation: none; }
       .track .car, .track .trail { transition: none; }
     }
+    /* Low-FPS mode: no animations or transitions anywhere in the panel */
+    .lite *, .lite *::before, .lite *::after, .focus.lite::before { animation: none !important; transition: none !important; }
+    .lite .rivals, .lite .live-people { display: none !important; }
     .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
     .card { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
     .card .k { color: var(--sub); font-size: 11px; }
@@ -1920,6 +1977,7 @@
               <div class="row"><input type="range" class="opacity" min="20" max="100"></div>
             </div>
             <div class="hint">Drag the header to move the panel, drag the bottom-right corner to resize it, ⊟ for compact mode, ▾ to collapse it.</div>
+            <label class="check"><input type="checkbox" data-k="lite"><span>Low-FPS mode<small>For slow computers: no animations, no live standings, and the panel updates once a second.</small></span></label>
             <button class="btn2 reset-panel">Reset position and size</button>
             <hr class="sep">
             <label class="check"><input type="checkbox" data-k="notify"><span>Desktop notifications<small class="notify-hint">Only when you're not looking at the tab (captchas always).</small></span></label>
@@ -1997,6 +2055,8 @@
       box.classList.toggle("collapsed", ui.collapsed);
       box.classList.toggle("compact", ui.compact);
       box.classList.toggle("debugging", settings.debug);
+      box.classList.toggle("lite", settings.lite);
+      focusEl.classList.toggle("lite", settings.lite);
       $(".collapse").textContent = ui.collapsed ? "▸" : "▾";
       $(".compact-btn").textContent = ui.compact ? "⊞" : "⊟";
       $(".compact-btn").title = ui.compact ? "Full panel" : "Compact mode";
@@ -2224,7 +2284,7 @@
     $(".reset-stats").addEventListener("click", () => session.resetStats());
 
     // ---- rendering ---------------------------------------------------------
-    panel.render = () => {
+    const renderNow = () => {
       const active = session.state.active;
       const statuses = [...panel.statuses.values()].sort((a, b) => a.at - b.at);
       const live = statuses.filter((s) => s.running).pop() ?? statuses.filter((s) => s.hasRace).pop();
@@ -2242,13 +2302,10 @@
 
       // The other racers: dots on the track and live standings while racing;
       // a result card with final standings afterwards.
-      const liveRacers = typing ? live.racers : null;
-      const dots = (liveRacers ?? [])
-        .filter((r) => !r.me)
-        .map((r) => `<i title="${esc(r.name)}" style="left: calc(4px + (100% - var(--car-w) - 16px) * ${r.pct.toFixed(4)} + var(--car-w) / 2)"></i>`)
-        .join("");
-      for (const el of $$(".rivals")) setHTML(el, dots);
-      setHTML($(".live-people"), liveRacers ? peopleHTML(liveRacers) : "");
+      const liveRacers = typing && !settings.lite ? live.racers : null;
+      const others = (liveRacers ?? []).filter((r) => !r.me);
+      for (const el of $$(".rivals")) updateRivals(el, others);
+      updatePeople($(".live-people"), liveRacers);
       const last = session.stats[session.stats.length - 1];
       const showCard = !typing && last && Date.now() - last.at < 30 * 60000;
       $(".result-card").hidden = !showCard;
@@ -2257,7 +2314,7 @@
       // focus view
       if (!focusEl.hidden) {
         focusEl.classList.toggle("running", active || typing);
-        setHTML($(".f-people"), liveRacers ? peopleHTML(liveRacers) : last?.official?.racers ? peopleHTML(last.official.racers) : "");
+        updatePeople($(".f-people"), liveRacers ?? last?.official?.racers);
         $(".f-status").textContent = $(".status").textContent;
         $(".f-num").textContent = typing && Number.isFinite(live.wpm) ? fmt(live.wpm) : last ? fmt(wpmOf(last)) : "–";
         $(".f-count").textContent = active ? `race ${Math.min(session.state.done + 1, session.state.total)} of ${session.state.total}` : "";
@@ -2279,23 +2336,83 @@
       panel.renderDebug();
     };
 
+    // Updates are batched: at most once per frame (once a second in Low-FPS
+    // mode), and none while the tab is hidden (caught up when it's shown).
+    let renderQueued = false;
+    let lastRenderAt = 0;
+    panel.render = () => {
+      if (renderQueued || document.hidden) return;
+      renderQueued = true;
+      const wait = settings.lite ? Math.max(0, 1000 - (Date.now() - lastRenderAt)) : 0;
+      const run = () =>
+        requestAnimationFrame(() => {
+          renderQueued = false;
+          lastRenderAt = Date.now();
+          if (!document.hidden) renderNow();
+        });
+      if (wait) timers.set(run, wait);
+      else run();
+    };
+    listen(document, "visibilitychange", () => panel.render());
+
     // ---- standings and result card ---------------------------------------------
     const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-    /** Rows: finishers by place, then everyone else by progress. Top 5, always with you. */
-    function peopleHTML(racers) {
-      if (!racers || racers.length < 2) return "";
+    /** Finishers by place, then everyone else by progress. Top 5, always with you. */
+    function standings(racers) {
+      if (!racers || racers.length < 2) return [];
       const rows = [...racers].sort((a, b) =>
         a.done && b.done ? (a.place ?? 99) - (b.place ?? 99) : a.done ? -1 : b.done ? 1 : b.pct - a.pct,
       );
       let shown = rows.slice(0, 5);
       const me = rows.find((r) => r.me);
       if (me && !shown.includes(me)) shown = [...shown.slice(0, 4), me];
-      return shown
+      return shown.map((r) => ({ ...r, pos: r.done && r.place ? ordinal(r.place) : String(rows.indexOf(r) + 1) }));
+    }
+
+    const setText = (el, text) => {
+      if (el.textContent !== text) el.textContent = text;
+    };
+
+    // Live standings change 4 times a second: update the rows in place (a
+    // number here, a bar there) instead of rebuilding them each time.
+    function updatePeople(container, racers) {
+      const rows = standings(racers);
+      const shape = rows.map((r) => (r.me ? "m" : "o")).join("");
+      if (container.__shape !== shape) {
+        container.__shape = shape;
+        setHTML(
+          container,
+          rows
+            .map((r) => `<div class="p-row${r.me ? " me" : ""}"><span class="p-pos"></span><span class="p-name"></span><span class="p-bar"><i></i></span><span class="p-wpm"></span></div>`)
+            .join(""),
+        );
+      }
+      rows.forEach((r, i) => {
+        const [pos, nameEl, bar, wpm] = container.children[i].children;
+        setText(pos, r.pos);
+        setText(nameEl, r.me ? "You" : r.name);
+        setText(wpm, r.wpm === undefined ? "–" : String(r.wpm));
+        bar.firstChild.style.transform = `scaleX(${(r.done ? 1 : r.pct).toFixed(3)})`;
+      });
+    }
+
+    // Dots on the track, moved in place.
+    function updateRivals(el, racers) {
+      if (el.children.length !== racers.length) setHTML(el, racers.map(() => "<i></i>").join(""));
+      racers.forEach((r, i) => {
+        const dot = el.children[i];
+        dot.style.setProperty("--rp", r.pct.toFixed(3));
+        if (dot.title !== r.name) dot.title = r.name;
+      });
+    }
+
+    function peopleHTML(racers) {
+      return standings(racers)
         .map((r) => {
-          const pos = r.done && r.place ? ordinal(r.place) : String(rows.indexOf(r) + 1);
-          const pct = Math.round((r.done ? 1 : r.pct) * 100);
-          return `<div class="p-row${r.me ? " me" : ""}"><span class="p-pos">${pos}</span><span class="p-name">${r.me ? "You" : esc(r.name)}</span><span class="p-bar"><i style="width:${pct}%"></i></span><span class="p-wpm">${r.wpm ?? "–"}</span></div>`;
+          const pos = r.pos;
+          const pct = r.done ? 1 : r.pct;
+          return `<div class="p-row${r.me ? " me" : ""}"><span class="p-pos">${pos}</span><span class="p-name">${r.me ? "You" : esc(r.name)}</span><span class="p-bar"><i style="transform:scaleX(${pct.toFixed(3)})"></i></span><span class="p-wpm">${r.wpm ?? "–"}</span></div>`;
         })
         .join("");
     }

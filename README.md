@@ -37,6 +37,17 @@ Start a session, then switch to another tab or window. It keeps going: all of it
 - Don't minimise the whole browser for long periods. Some systems pause minimised windows harder than background tabs.
 - If Nitro Type blocks Web Workers, the script falls back to normal timers. A background tab then gets slowed down, so keep it visible.
 
+## Performance
+
+The script is built to stay out of the way of Nitro Type's frame rate:
+
+- It never reads the whole page's text (that forces the browser to lay out the entire page). Popups and captchas are checked only inside dialogs and captcha widgets, every 1.5 s.
+- The race text is cached; each keystroke only asks the browser where the cursor is.
+- The panel is isolated from the page (CSS containment), updates at most once per frame, never while the tab is hidden, and only changes what changed. The car and dots move with GPU transforms, and the focus view's background drifts as one GPU layer.
+- **Low-FPS mode** (Panel tab) goes further for slow computers: no animations, no live standings or track dots, and the panel updates once a second.
+
+Measured with `npm run bench` (10 s of racing at 120 WPM on a page with ~4,000 extra elements): main-thread time went from about 2,000 ms (v3.3) to about 900 ms (v3.4), and 730 ms in Low-FPS mode. Typing alone, with no panel, costs about 700 ms, almost all of it the page redrawing the letters.
+
 ## Install
 
 1. Install Tampermonkey. On Chrome, open the Tampermonkey card in `chrome://extensions` → **Details**, and turn on **Allow User Scripts** (older Chrome versions need **Developer mode** on instead).
@@ -85,6 +96,7 @@ Bots break Nitro Type's rules. Accounts with bot-like stats get flagged, have th
 ```bash
 npm install
 npx playwright install chromium
-npm test            # all cases (about 4 minutes)
+npm test            # all cases (about 15 minutes)
+npm run bench       # main-thread cost during a race (also: -- focus, -- lite, -- none)
 ONLY=nitros npm test  # just the cases whose name contains "nitros"
 ```
