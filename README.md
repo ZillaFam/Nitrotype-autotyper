@@ -17,6 +17,10 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
   - milestones: new personal-best WPM, 3 wins in a row, every 5th win;
   - session done, with totals (races, average WPM and accuracy, wins, money, XP).
 - **Captcha pause**: if Nitro Type asks for a captcha, typing stops, the session ends and you get a notification (even with the tab in view). The script never touches the captcha: you solve it, then press Start. The always-on "protected by reCAPTCHA" badge is ignored.
+- **Safety stops**: a session ends (with a notification) instead of carrying on when:
+  - the computer was asleep or shut down (a big jump in the clock mid-session, or Chrome restoring the tab afterwards: the session is not resumed);
+  - Nitro Type says you're logged out;
+  - you're disqualified twice in a row. After a single "Disqualified!" it notifies you and presses that popup's **Race Again** (never "Go To Your Garage").
 - **Stop when the screen locks** (Panel tab): uses Chrome's Idle Detection, which asks for permission once, so a session doesn't keep running when you lock your computer and walk away.
 - **Simple by default**: the panel shows just speed, accuracy, nitros, races to run, the mini track and Start. Flip the **Advanced** switch at the bottom for every other setting plus the Stats and Panel tabs.
 - **Mini track**: a little car drives along a lane to a checkered finish as the race goes on, with a dot for each other racer.
@@ -81,7 +85,11 @@ If you had pasted an older version in by hand, open the install link once; Tampe
 - **It doesn't go to the next race.** It looks for a button labelled "Race Again", "Next Race", "Play Again" or "New Race", and reloads the page if it can't find one within about 12 seconds. If Nitro Type's button says something else, add it to `findRaceAgainButton()`.
 - **Panel says "Loaded late, so it may not type".** Tampermonkey ran the script after the page had loaded, so it couldn't get in ahead of Nitro Type. Tampermonkey Dashboard → Settings (set Config mode to Advanced if you can't see it) → **Content Script API** → **UserScripts API Dynamic**, then reload the page. It's the only mode with real document-start support in Chrome.
 - **Stats show `~` estimates instead of Nitro Type's results.** The script looks for a small block of text after the finish that mentions both "WPM" and accuracy. The debug view's `results:` line shows whether it found one. If Nitro Type's results screen is worded differently, send the debug info and a screenshot of the results.
-- **No notifications.** Allow notifications for nitrotype.com (padlock icon in the address bar → Notifications → Allow), then turn the setting off and on again.
+- **No notifications.** In the Panel tab, press **Send a test notification**; the line under it says whether your browser allows them. If it does but nothing pops up, notifications are being blocked further down:
+  1. Browser: padlock icon in the address bar → Notifications → **Allow** for nitrotype.com.
+  2. Windows: Settings → System → Notifications → turn on **Google Chrome** (or your browser), and turn off **Do not disturb** / Focus. macOS: System Settings → Notifications → **Google Chrome** → Allow, and check Focus.
+  3. By default they only appear when you're **not** looking at the Nitro Type tab; tick **Also when I'm looking at the tab** to get them always.
+- **"Disqualified due to inactivity".** Nitro Type stopped seeing your car move. Most often the tab was minimised or fully hidden: Nitro Type's own page may pause in a hidden tab even though the script keeps typing. Keep the Nitro Type window visible (it can be small and to the side). Two in a row stop the session.
 - **"Currently in a Race" popup.** Nitro Type shows this when you leave a race before it ends; it makes you wait until that race disqualifies you. If it appears during a session, the script waits 20–30 seconds and presses **Try Again** for you (never "Go To Your Garage"). The script itself never reloads or leaves the page during a race, its lobby or its countdown: it only moves on from a results screen.
 - **Nothing types at all.** Check that Tampermonkey's Content Script API setting is "UserScripts API Dynamic" (see above). If the race is in an iframe on a domain other than `nitrotype.com`, add a `// @match` line for it.
 

@@ -22,6 +22,8 @@
     captcha=1                                  a captcha appears mid-race (the race freezes); clicks on it are counted in window.__captchaClicks
     levelup=1                                  each race levels you up (state + "Level Up!" on the results screen)
     season=1                                   each race unlocks a season pass tier
+    dq=1 | dq=all                              the first race (or every race) ends in Nitro Type's "Disqualified!" popup
+    loggedout=1                                the race state says you're logged out
   Every page also has the always-on "protected by reCAPTCHA" badge, which must not count as a captcha.
   Like Nitro Type, #raceContainer's React fiber leads to the race component,
   whose state.racers holds every racer's progress and place. Three bots race
@@ -88,7 +90,8 @@
           { userID: 102, name: "Cruiser", wpm: 105 },
           { userID: 103, name: "Slowpoke", wpm: 55 },
         ];
-        const comp = { state: { racers: [], lessonContent: "" }, props: { user: { userID: ME, loggedIn: true, level: 11, seasonLevel: 4 } } };
+        const comp = { state: { racers: [], lessonContent: "" }, props: { user: { userID: ME, loggedIn: params.get("loggedout") !== "1", level: 11, seasonLevel: 4 } } };
+        window.__garageClicks = 0;
         // The always-on reCAPTCHA v3 badge: not a captcha to solve.
         document.write(`<iframe class="grecaptcha-badge" src="about:blank#https://www.google.com/recaptcha/api2/anchor?k=x&size=invisible" width="256" height="60" style="position:fixed;right:0;bottom:0;border:0"></iframe>`);
         window.__captchaClicks = 0;
@@ -159,6 +162,25 @@
         function moveTo(pos) {
           const r = race;
           me().progress.typed += pos - r.pos;
+          const dqMode = params.get("dq");
+          if (dqMode && !r.dq && pos >= 40 && (dqMode === "all" || !sessionStorage.getItem("mock-dq-done"))) {
+            // Nitro Type's popup: the race is over for you.
+            r.dq = true;
+            r.dead = true;
+            sessionStorage.setItem("mock-dq-done", "1");
+            document.body.insertAdjacentHTML(
+              "beforeend",
+              `<div class="modal modal--raceError" id="dq"><h2>Disqualified!</h2><p>Uh oh! You have been disqualified due to inactivity.</p>
+                 <button class="garage">Go To Your Garage</button><button class="again">Race Again</button></div>`,
+            );
+            const box = document.getElementById("dq");
+            box.querySelector(".garage").addEventListener("click", () => window.__garageClicks++);
+            box.querySelector(".again").addEventListener("click", (e) => {
+              if (!e.isTrusted) return void untrusted++;
+              box.remove();
+              setTimeout(newRace, 300);
+            });
+          }
           if (params.get("captcha") === "1" && !r.captcha && pos >= 50) {
             // A captcha takes over: the race freezes until it's solved.
             r.captcha = true;

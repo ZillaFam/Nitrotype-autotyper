@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.4.1
+// @version      3.5.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.4.1";
+  const VERSION = "3.5.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -617,7 +617,7 @@
   // every 1.5 s.
   const POPUP_SELECTOR =
     '.modal, [role="dialog"], [role="alertdialog"], [aria-modal="true"], [class*="modal" i], [class*="popup" i], [class*="captcha" i], [id*="captcha" i], [class*="challenge" i]';
-  let popupScan = { at: 0, captcha: false, stuck: false };
+  let popupScan = { at: 0, captcha: false, stuck: false, dq: false };
   function scanPopups() {
     const now = Date.now();
     if (now - popupScan.at < 1500) return popupScan;
@@ -629,21 +629,35 @@
       if (r.width > 30 && r.height > 30) captcha = true;
     }
     let stuck = false;
+    let dq = false;
     for (const el of document.querySelectorAll(POPUP_SELECTOR)) {
       if (el === panelHost || el.closest(".dash-copy")) continue;
       const text = el.textContent;
       const isCaptcha = !captcha && CAPTCHA_TEXT.test(text);
       const isStuck = !stuck && /currently in a race/i.test(text);
+      const isDq = !dq && /disqualified/i.test(text) && !/currently in a race/i.test(text);
       // Only now check it's actually showing (hidden templates don't count).
-      if ((isCaptcha || isStuck) && el.getClientRects().length) {
+      if ((isCaptcha || isStuck || isDq) && el.getClientRects().length) {
         captcha ||= isCaptcha;
         stuck ||= isStuck;
+        dq ||= isDq;
       }
     }
-    popupScan = { at: now, captcha, stuck };
+    popupScan = { at: now, captcha, stuck, dq };
     return popupScan;
   }
   const captchaShowing = () => scanPopups().captcha;
+
+  // Logged out (Nitro Type's race state says so): racing on would be as a
+  // guest, with nothing saved.
+  const loggedOut = () => raceComponent()?.props?.user?.loggedIn === false;
+
+  // A jump this big in the clock between two steps means the computer was
+  // asleep (lid closed, shut down with the tab restored, ...). Without the
+  // worker timers a hidden tab's timers can legitimately pause for a minute,
+  // so the limit is longer then.
+  const ASLEEP_MS = 30000;
+  const asleepLimit = () => (timers.usingWorker ? ASLEEP_MS : 5 * 60000);
 
   /** Your level and season-pass tier, if Nitro Type's race state has them. */
   function readProgress() {
@@ -765,6 +779,8 @@
     tick() {
       if (!this.armed || this.running || !this.settings) return;
       if (captchaShowing()) return this.captchaStop();
+      if (loggedOut()) return this.stopFor("loggedOut");
+      if (scanPopups().dq) return this.disqualified();
       const stuck = findStuckPopup();
       if (stuck !== undefined) return this.handleStuck(stuck);
       const race = readRace();
@@ -784,6 +800,45 @@
         this.running = false;
         this.status(`Error: ${err.message}`);
       });
+    },
+
+    // Stop typing at once and tell the session why ("loggedOut", "asleep").
+    stopFor(kind) {
+      this.runId++;
+      this.running = false;
+      this.status(kind === "asleep" ? "Stopped: computer was asleep" : "Stopped: logged out");
+      toTop({ kind });
+    },
+
+    // Nitro Type disqualified us. Report it once per popup; the session
+    // decides whether to go on (pressing the popup's Race Again) or stop.
+    disqualified() {
+      const wasRunning = this.running;
+      this.runId++;
+      this.running = false;
+      const race = readRace();
+      if (race) {
+        this.lastRace = race;
+        this.lastRaceFinished = true; // over, one way or another
+      }
+      if (this.dqReported && !wasRunning) return;
+      // Just pressed Race Again on it: the popup is on its way out.
+      if (Date.now() - (this.dqLeftAt ?? 0) < 4000) return;
+      this.dqReported = true;
+      this.status("Disqualified");
+      toTop({ kind: "disqualified" });
+    },
+
+    // Press Race Again on the "Disqualified!" popup.
+    leaveDisqualified() {
+      const button = findRaceAgainButton();
+      if (button && scanPopups().dq) {
+        LOG("clicking Race Again on the disqualified popup");
+        clickElement(button);
+        this.dqLeftAt = Date.now();
+        popupScan.at = 0; // look again next time, the popup is going away
+      }
+      this.dqReported = false;
     },
 
     // A captcha showed up: stop typing at once and tell the session.
@@ -857,8 +912,12 @@
       this.status("Waiting for the race to start…", { target });
       const waitStart = performance.now();
       let race = startRace;
+      let probeWall = Date.now();
       while (alive()) {
+        if (Date.now() - probeWall > asleepLimit()) return this.stopFor("asleep");
+        probeWall = Date.now();
         if (captchaShowing()) return this.captchaStop();
+        if (scanPopups().dq) return this.disqualified();
         const seen = readRace();
         if (!stillHere(seen)) return this.finishRun(id, "Race closed");
         if (!sameRace(seen, startRace)) {
@@ -891,13 +950,18 @@
       let lastPressAt = 0;
       let lastPressPos = -1;
       let lastProgressAt = performance.now();
+      let lastLoopWall = Date.now();
       let lastTypoPos = -1;
       let nextAt = performance.now();
 
       while (alive()) {
         await sleep(nextAt - performance.now());
         if (!alive()) return;
+        // Woke up from sleep (lid closed, ...): stop before pressing a key.
+        if (Date.now() - lastLoopWall > asleepLimit()) return this.stopFor("asleep");
+        lastLoopWall = Date.now();
         if (captchaShowing()) return this.captchaStop();
+        if (scanPopups().dq) return this.disqualified();
         const seen = readRace();
         if (!stillHere(seen)) return this.finishRun(id, "Race closed");
         if (!sameRace(seen, startRace)) {
@@ -1182,6 +1246,7 @@
     if (typeof msg.focus === "boolean") engine.focusOpen = msg.focus;
     if (typeof msg.armed === "boolean") engine.setArmed(msg.armed);
     if (msg.cmd === "next") engine.nextRace();
+    if (msg.cmd === "leaveDq") engine.leaveDisqualified();
     if (msg.cmd === "reload") engine.reloadRace();
   }
 
@@ -1203,13 +1268,13 @@
   const DEFAULTS = {
     wpmMin: 80, wpmMax: 95, accMin: 96, accMax: 98, variance: 25, nitros: 1, races: 5,
     breakEvery: 0, breakLenMin: 1, breakLenMax: 3, // long break every ~N races (0 = off), minutes
-    notify: false, debug: false,
+    notify: false, debug: false, notifyAlways: false,
     // which notifications (all need "notify" on)
     notifyRace: true, notifyLevel: true, notifySeason: true, notifySession: true, notifyMilestone: true, notifyCaptcha: true,
     stopOnLock: false, // stop the session when the computer's screen locks
     lite: false, // Low-FPS mode: fewer panel updates, no animations
   };
-  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite"];
+  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways"];
   const LIMITS = {
     wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
     nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
@@ -1278,6 +1343,41 @@
       }
       this.state = { ...this.state, ...readJSON(sessionStorage, KEYS.session, {}) };
       this.stats = readJSON(localStorage, KEYS.stats, []);
+      // Chrome restores a tab's session storage after a restart, a crash or
+      // sleep. A session whose last heartbeat is old was interrupted: end it
+      // instead of picking up typing again.
+      if (this.state.active && Date.now() - (this.state.beat ?? 0) > asleepLimit()) {
+        this.state.active = false;
+        this.state.breakUntil = 0;
+        this.save();
+        this.message = "Stopped: the browser was closed or the computer was off. Press Start to go again.";
+        this.messageAt = Date.now();
+      }
+    },
+    // Every few seconds while a session runs; also notices sleep.
+    heartbeat() {
+      const now = Date.now();
+      const gap = now - (this.lastBeat ?? now);
+      this.lastBeat = now;
+      if (!this.state.active) return;
+      if (gap > asleepLimit()) {
+        this.stop("Stopped: your computer was asleep");
+        return;
+      }
+      this.state.beat = now;
+      this.save();
+    },
+    disqualified() {
+      if (!this.state.active) return;
+      this.dqInARow = (this.dqInARow ?? 0) + 1;
+      if (this.dqInARow >= 2) {
+        this.stop("Stopped: disqualified twice in a row");
+        return;
+      }
+      notify("race", "Disqualified for inactivity. Going on to the next race.");
+      this.say("Disqualified. Next race soon…");
+      timers.clear(this.nextTimer);
+      this.nextTimer = timers.set(() => this.state.active && toEngines({ cmd: "leaveDq" }), rand(3000, 6000));
     },
     save() {
       writeJSON(sessionStorage, KEYS.session, this.state);
@@ -1296,7 +1396,8 @@
     },
     start() {
       const s = loadSettings();
-      this.state = { active: true, total: s.races, done: 0, sinceBreak: 0, breakAfter: this.pickBreakAfter(s), breakUntil: 0, startAt: Date.now() };
+      this.dqInARow = 0;
+      this.state = { active: true, total: s.races, done: 0, sinceBreak: 0, breakAfter: this.pickBreakAfter(s), breakUntil: 0, startAt: Date.now(), beat: Date.now() };
       this.save();
       this.sync();
       this.say("Waiting for a race…");
@@ -1388,6 +1489,7 @@
       timers.clear(this.fallbackTimer);
     },
     raceDone(result) {
+      this.dqInARow = 0;
       this.stats.push(result);
       if (this.stats.length > 300) this.stats.splice(0, this.stats.length - 300);
       writeJSON(localStorage, KEYS.stats, this.stats);
@@ -1509,12 +1611,18 @@
     const s = loadSettings();
     const kind = NOTIFY[type];
     if (!kind || !s.notify || !s[kind.key]) return;
-    if (!always && !(document.hidden || !document.hasFocus())) return;
-    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    if (!always && !s.notifyAlways && !(document.hidden || !document.hasFocus())) return;
+    showNotification(kind.title, message, `nt-autotyper-${type}`);
+  }
+
+  function showNotification(title, body, tag) {
+    if (!("Notification" in window) || Notification.permission !== "granted") return false;
     try {
-      new Notification(kind.title, { body: message, tag: `nt-autotyper-${type}` });
+      new Notification(title, { body, tag, icon: "/favicon.ico" });
+      return true;
     } catch {
       /* some browsers only allow notifications from a service worker */
+      return false;
     }
   }
 
@@ -1562,6 +1670,15 @@
       case "captcha":
         session.captcha();
         break;
+      case "disqualified":
+        session.disqualified();
+        break;
+      case "loggedOut":
+        if (session.state.active) session.stop("Stopped: you're logged out of Nitro Type");
+        break;
+      case "asleep":
+        if (session.state.active) session.stop("Stopped: your computer was asleep");
+        break;
       case "raceResult":
         session.attachOfficial(msg.at, msg.official);
         break;
@@ -1604,6 +1721,7 @@
       updateTitle(); // the page may have changed its title
     }, 1500);
     timers.every(() => session.tickBreak(), 1000);
+    timers.every(() => session.heartbeat(), 2000);
     if (loadSettings().stopOnLock) lockWatch.start(false);
     // Reloaded in the middle of a break: finish the break, then carry on.
     if (session.onBreak()) session.scheduleNext(session.state.breakUntil - Date.now());
@@ -1852,6 +1970,8 @@
     .check small { display: block; color: var(--sub); font-size: 11px; }
     .sub-checks { display: grid; gap: 7px; padding-left: 22px; }
     .sub-checks.off { opacity: .45; pointer-events: none; }
+    .notify-test { display: grid; gap: 4px; }
+    .notify-status { color: var(--sub); font-size: 11px; }
     .sep { border: 0; border-top: 1px solid var(--line); margin: 0; }
     .breaks { display: grid; grid-template-columns: auto 52px auto; align-items: center; gap: 6px; color: var(--sub); font-size: 12px; }
     .breaks input[type=number] { width: 52px; }
@@ -1988,7 +2108,9 @@
               <label class="check"><input type="checkbox" data-k="notifyMilestone"><span>Milestones<small>Personal best WPM, win streaks</small></span></label>
               <label class="check"><input type="checkbox" data-k="notifySession"><span>Session done<small>Totals: races, WPM, wins, money, XP</small></span></label>
               <label class="check"><input type="checkbox" data-k="notifyCaptcha"><span>Captcha (session stopped)</span></label>
+              <label class="check"><input type="checkbox" data-k="notifyAlways"><span>Also when I'm looking at the tab</span></label>
             </div>
+            <div class="notify-test"><button class="btn2 test-notify">Send a test notification</button><small class="notify-status"></small></div>
             <label class="check"><input type="checkbox" data-k="stopOnLock"><span>Stop when my screen locks<small class="lock-hint">Chrome asks for permission once.</small></span></label>
             <label class="check"><input type="checkbox" data-k="debug"><span>Debug view<small>Shows what the script sees on the page. Copy it and send it over if something breaks.</small></span></label>
             <button class="btn2 copy-debug">Copy debug info</button>
@@ -2197,7 +2319,30 @@
       fillLabels();
     }
     // The per-type switches only matter with notifications on.
-    const syncSubChecks = () => $(".sub-checks").classList.toggle("off", !settings.notify);
+    const syncSubChecks = () => {
+      $(".sub-checks").classList.toggle("off", !settings.notify);
+      showNotifyStatus();
+    };
+    function showNotifyStatus() {
+      const perm = "Notification" in window ? Notification.permission : "unsupported";
+      $(".notify-status").textContent =
+        perm === "granted"
+          ? "Your browser allows notifications from nitrotype.com."
+          : perm === "denied"
+            ? "Blocked for nitrotype.com: click the padlock in the address bar → Notifications → Allow."
+            : perm === "unsupported"
+              ? "This browser can't show desktop notifications."
+              : "Not allowed yet: the test button will ask.";
+    }
+    $(".test-notify").addEventListener("click", async () => {
+      if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission().catch(() => {});
+      const ok = showNotification("NT Autotyper", "Test: notifications are working.", "nt-autotyper-test");
+      showNotifyStatus();
+      $(".notify-status").textContent += ok
+        ? " Sent! Nothing popped up? Check your system's notification settings for your browser, and Do Not Disturb / Focus."
+        : "";
+      $(".test-notify").blur();
+    });
     function fillLabels() {
       const span = (a, b, unit) => {
         const lo = Math.min(a, b);

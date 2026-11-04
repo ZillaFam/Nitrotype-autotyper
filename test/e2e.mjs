@@ -335,6 +335,108 @@ try {
     await context.close();
   });
 
+  await test("restored tab after shutdown: doesn't resume", async (name) => {
+    const { context, page } = await open("?countdown=300", { ...BASE, races: 5 }, null, () => {
+      // Chrome restored the tab: the session was on, last heartbeat 2 min ago.
+      if (!sessionStorage.getItem("restored")) {
+        sessionStorage.setItem("restored", "1");
+        sessionStorage.setItem("nt-autotyper-session", JSON.stringify({ active: true, total: 5, done: 2, beat: Date.now() - 120000 }));
+      }
+    });
+    await page.waitForTimeout(2500);
+    check(`${name}: session not resumed`, (await page.locator(".go").textContent()) === "Start" && (await page.evaluate(() => document.querySelectorAll(".is-typed").length)) === 0);
+    check(`${name}: says why`, (await status(page)).startsWith("Stopped: the browser was closed or the computer was off"), await status(page));
+    await context.close();
+  });
+
+  await test("computer asleep mid-race: stops", async (name) => {
+    const { context, page } = await open("?countdown=300", { ...BASE, wpmMin: 60, wpmMax: 60, races: 3 });
+    await page.locator(".go").click();
+    await page.waitForTimeout(2000);
+    // The lid closes for a minute: the clock jumps when it wakes up.
+    await page.evaluate(() => {
+      const real = Date.now;
+      Date.now = () => real() + 60000;
+    });
+    await page.waitForTimeout(1500);
+    const typed = () => page.evaluate(() => document.querySelectorAll(".is-typed").length);
+    const t1 = await typed();
+    await page.waitForTimeout(1000);
+    check(`${name}: stops typing`, (await typed()) === t1);
+    check(`${name}: session stopped with a message`, (await status(page)) === "Stopped: your computer was asleep" && (await page.locator(".go").textContent()) === "Start", await status(page));
+    await context.close();
+  });
+
+  await test("disqualified once: notifies and moves on", async (name) => {
+    const { context, page } = await open("?dq=1&countdown=300", { ...BASE, wpmMin: 150, wpmMax: 150, races: 1, notify: true, notifyAlways: true }, null, () => {
+      window.__notes = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+        }
+      };
+    });
+    await page.locator(".go").click();
+    await page.waitForFunction(() => document.getElementById("dq"), null, { timeout: 30000 });
+    await page.waitForTimeout(2500);
+    check(`${name}: says so`, (await status(page)) === "Disqualified. Next race soon…", await status(page));
+    const notes = await page.evaluate(() => window.__notes);
+    check(`${name}: notification`, notes.includes("Race finished: Disqualified for inactivity. Going on to the next race."), JSON.stringify(notes));
+    const [r] = await waitForResults(page, 1, 60000);
+    check(`${name}: pressed Race Again (not the garage) and raced`, r.correct > 100 && (await page.evaluate(() => window.__garageClicks)) === 0);
+    await page.waitForTimeout(1500);
+    check(`${name}: the disqualified race didn't count`, (await status(page)) === "Done: 1 race", await status(page));
+    await context.close();
+  });
+
+  await test("disqualified twice in a row: stops", async (name) => {
+    const { context, page } = await open("?dq=all&countdown=300", { ...BASE, wpmMin: 150, wpmMax: 150, races: 5, notify: true, notifyAlways: true }, null, () => {
+      window.__notes = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+        }
+      };
+    });
+    await page.locator(".go").click();
+    await page.waitForFunction(() => window.__notes.some((n) => n.includes("twice in a row")), null, { timeout: 60000 });
+    check(`${name}: session stopped`, (await status(page)) === "Stopped: disqualified twice in a row" && (await page.locator(".go").textContent()) === "Start", await status(page));
+    check(`${name}: never went to the garage`, (await page.evaluate(() => window.__garageClicks)) === 0);
+    await context.close();
+  });
+
+  await test("logged out: stops", async (name) => {
+    const { context, page } = await open("?loggedout=1&countdown=300", { ...BASE, races: 3 });
+    await page.locator(".go").click();
+    await page.waitForTimeout(2000);
+    check(`${name}: session stopped, nothing typed`, (await status(page)) === "Stopped: you're logged out of Nitro Type" && (await page.evaluate(() => document.querySelectorAll(".is-typed").length)) === 0, await status(page));
+    await context.close();
+  });
+
+  await test("notification test button", async (name) => {
+    const { context, page } = await open("", { ...BASE, notify: true }, null, () => {
+      window.__notes = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+        }
+      };
+    });
+    await page.locator('nav button[data-tab="panel"]').click();
+    check(`${name}: shows the permission state`, (await page.locator(".notify-status").textContent()).startsWith("Your browser allows notifications"), await page.locator(".notify-status").textContent());
+    await page.locator(".test-notify").click();
+    const notes = await page.evaluate(() => window.__notes);
+    check(`${name}: sends one right away`, notes.length === 1 && notes[0] === "NT Autotyper: Test: notifications are working.", JSON.stringify(notes));
+    check(`${name}: says where to look if nothing popped up`, (await page.locator(".notify-status").textContent()).includes("Sent!"));
+    await context.close();
+  });
+
   await test("long breaks between races", async (name) => {
     const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 200, wpmMax: 200, races: 2, breakEvery: 1, breakLenMin: 0.1, breakLenMax: 0.1 });
     await page.evaluate(() => (document.title = "Nitro Type"));
