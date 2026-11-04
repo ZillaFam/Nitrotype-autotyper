@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.5.0
+// @version      3.6.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.5.0";
+  const VERSION = "3.6.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -539,6 +539,10 @@
         const done = p.completeStamp > 0;
         const ms = (done ? p.completeStamp : Date.now()) - p.startStamp;
         return {
+          id: r.userID,
+          lane: Number.isFinite(r.lane) ? r.lane : undefined,
+          kind: r.userID === myId ? "me" : r.profile?.specialRobot === "wampus" ? "wampus" : r.robot ? "bot" : "player",
+          skipped: p.skipped || 0,
           name: String(nameOf(r)),
           me: myId !== undefined && r.userID === myId,
           pct: Math.max(0, Math.min(1, typed / len)),
@@ -548,6 +552,61 @@
           done,
         };
       });
+  }
+
+  // ---- your totals: money, XP, level -----------------------------------------
+  //
+  // Money and XP earned in a race = your totals after it minus before it.
+  // Nitro Type sends your updated totals with the race update when you
+  // finish (racer.rewards.current), and keeps them in its saved state
+  // (localStorage "persist:nt"). Read-only; your login token is never used.
+
+  function readSavedUser() {
+    try {
+      const outer = JSON.parse(localStorage.getItem("persist:nt") || "null");
+      const user = typeof outer?.user === "string" ? JSON.parse(outer.user) : outer?.user;
+      return user && typeof user === "object" ? user : null;
+    } catch {
+      return null;
+    }
+  }
+
+  const asNumber = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? undefined : Number(v));
+  const totalsOf = (u) => ({ money: asNumber(u?.money), xp: asNumber(u?.experience ?? u?.xp), level: asNumber(u?.level) });
+
+  // Race updates from Nitro Type's server, as they arrive (read-only listener).
+  const heardServers = new WeakSet();
+  let serverRewards = null;
+  function listenToServer() {
+    const comp = raceComponent();
+    const server = comp?.server;
+    if (!server || typeof server.on !== "function" || heardServers.has(server)) return;
+    heardServers.add(server);
+    try {
+      server.on("update", (e) => {
+        const myId = comp.props?.user?.userID;
+        const me = e?.racers?.find?.((r) => r?.userID === myId);
+        if (me?.rewards) serverRewards = me.rewards;
+      });
+    } catch {
+      /* not an event emitter after all */
+    }
+  }
+
+  /** Your updated totals for the race you just finished, if Nitro Type sent them. */
+  function finishedTotals() {
+    const comp = raceComponent();
+    const myId = comp?.props?.user?.userID;
+    const me = comp?.state?.racers?.find?.((r) => r?.userID === myId);
+    const current = me?.rewards?.current ?? serverRewards?.current;
+    return current ? totalsOf(current) : null;
+  }
+
+  /** Your totals right now: saved state first, then the race component. */
+  function savedTotals() {
+    const saved = totalsOf(readSavedUser());
+    const props = totalsOf(raceComponent()?.props?.user);
+    return { money: saved.money ?? props.money, xp: saved.xp ?? props.xp, level: saved.level ?? props.level };
   }
 
   /** Your official result from the race state, once you've crossed the line. */
@@ -591,12 +650,13 @@
    * level/tier in the race state with before the race, and looks for the
    * results screen's wording ("Level Up", "Reward Unlocked", ...).
    */
-  function levelChanges(before = {}) {
+  function levelChanges(before = {}, totals = {}) {
     const after = readProgress();
     const screen = document.querySelector(".race-results, .raceResults");
     const text = screen ? textOf(screen) : "";
     const out = {};
-    if (after.level && before.level && after.level > before.level) out.levelUp = after.level;
+    if (totals.after && totals.before && totals.after > totals.before) out.levelUp = totals.after;
+    else if (after.level && before.level && after.level > before.level) out.levelUp = after.level;
     else if (/level\s*up|new level|reached level/i.test(text)) out.levelUp = Number(text.match(/(?:reached )?level\s*(\d+)/i)?.[1]) || true;
     if (after.season && before.season && after.season > before.season) out.seasonUp = after.season;
     else if (/season (?:pass )?reward|reward unlocked|new tier|tier \d+ unlocked/i.test(text)) out.seasonUp = Number(text.match(/tier\s*(\d+)/i)?.[1]) || true;
@@ -906,6 +966,9 @@
       this.dbg = { sent: 0, typos: 0, nitrosTried: 0, nitrosUsed: 0, target, accTarget };
       this.watchResults.snapshot(); // what's on screen before the race
       this.progressBefore = readProgress(); // level / season tier, to spot a level up
+      listenToServer();
+      serverRewards = null;
+      this.totalsBefore = savedTotals(); // money / XP / level before the race
       focusRace();
 
       // Wait for GO: keep trying the first key until Nitro Type takes it.
@@ -1102,8 +1165,27 @@
                 .map((c) => parseResults(c.text))
                 .find((r) => r.wpm) ?? null;
           }
-          // Wait for the results screen (money, XP) unless it's slow to show.
-          const ready = (screen && (screen.wpm || state)) || (state && elapsed > 4000) || (text && elapsed > 1500) || elapsed > 10000;
+          // Money and XP: totals after minus before (the race update's totals,
+          // or the saved state once it has changed).
+          const before = engine.totalsBefore ?? {};
+          const sent = finishedTotals();
+          const saved = savedTotals();
+          const diff = (a, b) => (Number.isFinite(a) && Number.isFinite(b) && a - b >= 0 && a - b < 1e7 ? a - b : undefined);
+          const earned = sent
+            ? { money: diff(sent.money, before.money), xp: diff(sent.xp, before.xp), level: sent.level, from: "race update" }
+            : {
+                money: diff(saved.money, before.money) || undefined,
+                xp: diff(saved.xp, before.xp) || undefined,
+                level: saved.level,
+                from: "saved state",
+              };
+          const haveEarned = earned.money !== undefined || earned.xp !== undefined;
+          // Wait a moment for the money and XP (and the results screen).
+          const ready =
+            (state && (haveEarned || screen?.money !== undefined || elapsed > 6000)) ||
+            (screen && screen.wpm && (haveEarned || elapsed > 3000)) ||
+            (text && elapsed > 1500) ||
+            elapsed > 10000;
           if (!ready) {
             timers.set(poll, 400);
             return;
@@ -1113,11 +1195,12 @@
             wpm: pick("wpm"),
             accuracy: pick("accuracy"),
             place: pick("place"),
-            money: screen?.money ?? text?.money,
-            xp: screen?.xp ?? text?.xp,
+            money: earned.money ?? screen?.money ?? text?.money,
+            xp: earned.xp ?? screen?.xp ?? text?.xp,
             racers: readRacers() ?? screen?.racers ?? null,
             source: state ? "race state" : screen ? "results screen" : "page text",
-            ...levelChanges(engine.progressBefore),
+            moneySource: earned.money !== undefined ? earned.from : screen?.money !== undefined ? "results screen" : text?.money !== undefined ? "page text" : "not found",
+            ...levelChanges(engine.progressBefore, { before: before.level, after: earned.level }),
           };
           if (!official.wpm) {
             this.found = { notFound: true };
@@ -1156,7 +1239,13 @@
           return `level ${pr.level ?? "?"}, season tier ${pr.season ?? "?"}`;
         })(),
         captcha: captchaShowing() ? "SHOWING" : "none",
-        results: !found ? "-" : found.notFound ? "not found" : `${found.wpm} WPM, ${found.accuracy ?? "?"}%, place ${found.place ?? "?"}, $${found.money ?? "?"}, ${found.xp ?? "?"} XP (from ${found.source})`,
+        results: !found ? "-" : found.notFound ? "not found" : `${found.wpm} WPM, ${found.accuracy ?? "?"}%, place ${found.place ?? "?"} (from ${found.source})`,
+        rewards: !found || found.notFound ? "-" : `$${found.money ?? "?"}, ${found.xp ?? "?"} XP (from ${found.moneySource})`,
+        totals: (() => {
+          const t = savedTotals();
+          return `money ${t.money ?? "?"}, XP ${t.xp ?? "?"}, level ${t.level ?? "?"}`;
+        })(),
+        miniMap: miniMap.host ? "on (race track hidden)" : engine.settings?.miniMap ? "waiting for the race track" : "off",
         timers: timers.usingWorker ? "worker (full speed in background)" : "page timers (slowed in background)",
       };
     },
@@ -1185,6 +1274,136 @@
   };
 
   timers.every(() => engine.tick(), 250);
+
+  // =========================================================================
+  // 6b. Mini map (replaces Nitro Type's race track)
+  // =========================================================================
+  //
+  // Five lanes, start and finish lines, a block per racer (you, players,
+  // bots, the Wampus), an orange streak for nitros, places at the finish.
+  // Inspired by Toonidy's "Nitro Type - Racing Mini Map" (MIT). Nitro Type's
+  // track canvas is only hidden, never removed, and comes back when the map
+  // is turned off. Everything moves with transforms; nothing runs while the
+  // tab is hidden.
+
+  const MINIMAP_CSS = `
+    :host { all: initial; display: block; }
+    .map {
+      position: relative; height: 128px; margin: 0 0 6px; overflow: hidden; border-radius: 8px;
+      background: #20222e; container-type: inline-size; contain: layout paint style;
+      font: 600 11px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    .lanes { position: absolute; inset: 0; background: repeating-linear-gradient(to bottom, transparent 0 calc(20% - 1px), #3a3e52 calc(20% - 1px) 20%); }
+    .start, .finish { position: absolute; top: 0; bottom: 0; width: 2px; }
+    .start { left: 36px; background: #8b8fa3; }
+    .finish { right: 36px; background: repeating-linear-gradient(to bottom, #e8ebf5 0 4px, #20222e 4px 8px); }
+    .car {
+      --p: 0; position: absolute; left: 4px; width: 32px; height: calc(20% - 8px); margin-top: 4px;
+      transform: translateX(calc(var(--p) * (100cqw - 76px))); transition: transform .4s linear; will-change: transform;
+    }
+    .body { position: absolute; inset: 0; border-radius: 5px; background: var(--c); box-shadow: 0 0 0 2px #20222e; }
+    .me { --c: #f2887f; } .player { --c: #5097e3; } .bot { --c: #b8bac4; } .wampus { --c: #bc530d; }
+    .me .body { box-shadow: 0 0 0 2px #20222e, 0 0 10px rgba(242, 136, 127, .55); }
+    .label {
+      position: absolute; top: 50%; left: calc(100% + 6px); transform: translateY(-50%);
+      color: #c9ccd8; white-space: nowrap; text-shadow: 0 1px 2px #000;
+    }
+    .me .label { color: #ffd6d1; }
+    .flip .label { left: auto; right: calc(100% + 6px); }
+    .nitro { position: absolute; top: calc(50% - 1px); right: 100%; height: 3px; width: 0; border-radius: 2px; background: #ef9e18; opacity: 0; }
+    .lite .car { transition: none; }
+  `;
+
+  const miniMap = {
+    host: null,
+    canvas: null,
+    cars: new Map(), // racer id -> { el, p, skipped }
+    lastAt: 0,
+    boosts: 0,
+
+    sync() {
+      const s = engine.settings;
+      const container = document.getElementById("raceContainer");
+      const canvas = container?.querySelector("canvas");
+      if (!s?.miniMap || !container || !canvas || !readRace()) return this.remove();
+      if (!this.host || !this.host.isConnected) this.build(canvas);
+      if (canvas.style.display !== "none") {
+        this.canvas = canvas;
+        this.canvasDisplay = canvas.style.display;
+        canvas.style.display = "none";
+      }
+      if (document.hidden) return;
+      const now = Date.now();
+      if (s.lite && now - this.lastAt < 1000) return;
+      this.lastAt = now;
+      this.update(s);
+    },
+
+    build(canvas) {
+      this.remove();
+      this.host = document.createElement("div");
+      this.host.className = "nta-minimap";
+      this.root = this.host.attachShadow({ mode: "open" });
+      setHTML(this.root, `<style>${MINIMAP_CSS}</style><div class="map"><div class="lanes"></div><div class="start"></div><div class="finish"></div></div>`);
+      this.map = this.root.querySelector(".map");
+      this.cars = new Map();
+      canvas.before(this.host);
+    },
+
+    remove() {
+      if (this.host) this.host.remove();
+      this.host = null;
+      if (this.canvas) this.canvas.style.display = this.canvasDisplay ?? "";
+      this.canvas = null;
+    },
+
+    update(s) {
+      this.map.classList.toggle("lite", Boolean(s.lite));
+      const race = readRace();
+      let racers = readRacers();
+      if (!racers?.length) racers = [{ id: "me", me: true, kind: "me", name: "You", pct: 0, skipped: 0, done: false }];
+      const width = this.map.clientWidth;
+      const seen = new Set();
+      racers.slice(0, 5).forEach((r, i) => {
+        const id = r.id ?? `r${i}`;
+        seen.add(id);
+        let car = this.cars.get(id);
+        if (!car) {
+          const el = document.createElement("div");
+          el.innerHTML = htmlPolicy ? htmlPolicy.createHTML('<i class="nitro"></i><b class="body"></b><span class="label"></span>') : '<i class="nitro"></i><b class="body"></b><span class="label"></span>';
+          this.map.append(el);
+          car = { el, p: 0, skipped: r.skipped || 0 };
+          this.cars.set(id, car);
+        }
+        // You: from the letters on screen (instant); others: race state.
+        const p = r.me && race && race.pos !== null ? Math.min(1, race.pos / race.text.length) : r.done ? 1 : r.pct;
+        const lane = Math.min(4, Math.max(0, r.lane ?? i));
+        car.el.className = `car ${r.kind || (r.me ? "me" : "bot")}${p > 0.72 ? " flip" : ""}`;
+        car.el.style.top = `${lane * 20}%`;
+        // A nitro jump: an orange streak from where it started, fading out.
+        if ((r.skipped || 0) > car.skipped && p > car.p) {
+          const streak = car.el.firstChild;
+          streak.style.width = `${Math.round((p - car.p) * (width - 76))}px`;
+          streak.animate?.([{ opacity: 1 }, { opacity: 0 }], { duration: 1400, easing: "ease-out" });
+          this.boosts++;
+          this.host.dataset.boosts = String(this.boosts);
+        }
+        car.skipped = r.skipped || 0;
+        car.p = p;
+        car.el.style.setProperty("--p", p.toFixed(4));
+        const label = r.done && r.place ? `${ordinalOf(r.place)} · ${r.me ? "You" : r.name}` : r.me ? "You" : r.name;
+        const labelEl = car.el.lastChild;
+        if (labelEl.textContent !== label) labelEl.textContent = label;
+      });
+      for (const [id, car] of this.cars) {
+        if (!seen.has(id)) {
+          car.el.remove();
+          this.cars.delete(id);
+        }
+      }
+    },
+  };
+  timers.every(() => miniMap.sync(), 250);
   timers.every(() => {
     if (engine.settings?.debug && (IS_TOP || readRace())) toTop({ kind: "debug", info: engine.debugInfo() });
   }, 1000);
@@ -1273,8 +1492,9 @@
     notifyRace: true, notifyLevel: true, notifySeason: true, notifySession: true, notifyMilestone: true, notifyCaptcha: true,
     stopOnLock: false, // stop the session when the computer's screen locks
     lite: false, // Low-FPS mode: fewer panel updates, no animations
+    miniMap: true, // show a mini map in place of Nitro Type's race track
   };
-  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways"];
+  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap"];
   const LIMITS = {
     wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
     nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
@@ -2097,6 +2317,7 @@
               <div class="row"><input type="range" class="opacity" min="20" max="100"></div>
             </div>
             <div class="hint">Drag the header to move the panel, drag the bottom-right corner to resize it, ⊟ for compact mode, ▾ to collapse it.</div>
+            <label class="check"><input type="checkbox" data-k="miniMap"><span>Mini map instead of the race track<small>A light five-lane map of every racer, in place of Nitro Type's track.</small></span></label>
             <label class="check"><input type="checkbox" data-k="lite"><span>Low-FPS mode<small>For slow computers: no animations, no live standings, and the panel updates once a second.</small></span></label>
             <button class="btn2 reset-panel">Reset position and size</button>
             <hr class="sep">

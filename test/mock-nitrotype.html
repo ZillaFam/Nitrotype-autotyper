@@ -24,6 +24,11 @@
     season=1                                   each race unlocks a season pass tier
     dq=1 | dq=all                              the first race (or every race) ends in Nitro Type's "Disqualified!" popup
     loggedout=1                                the race state says you're logged out
+    rewards=hidden                             no rewards box on the results screen (money/XP must come from totals)
+    server=none                                no race-update events (money/XP must come from the saved state)
+  Your account totals live in localStorage "persist:nt" (like Nitro Type) and
+  arrive with the finishing race update as racer.rewards.current. The race
+  track is a <canvas> in #raceContainer.
   Every page also has the always-on "protected by reCAPTCHA" badge, which must not count as a captcha.
   Like Nitro Type, #raceContainer's React fiber leads to the race component,
   whose state.racers holds every racer's progress and place. Three bots race
@@ -79,7 +84,7 @@
         document.write(`<nav><a href="#" class="decoy" onclick="event.preventDefault(); window.__decoyClicks++">New Race</a></nav>`);
         // Like Nitro Type's header: WPM and accuracy that are NOT race results.
         document.write(`<div class="profile-stats"><span>Avg Speed</span> <b>88 WPM</b> <span>Acc</span> <b>96%</b></div>`);
-        document.write(`<div id="raceContainer"><div class="dash"><div class="dash-copy"></div><input class="dash-copy-input" autocomplete="off"></div><div id="after"></div></div>`);
+        document.write(`<div id="raceContainer"><canvas class="race-track" width="1024" height="220" style="display:block;width:100%;height:220px;background:#0b1020"></canvas><div class="dash"><div class="dash-copy"></div><input class="dash-copy-input" autocomplete="off"></div><div id="after"></div></div>`);
         const raceContainer = document.getElementById("raceContainer");
         const copy = document.querySelector(".dash-copy");
 
@@ -96,6 +101,21 @@
         document.write(`<iframe class="grecaptcha-badge" src="about:blank#https://www.google.com/recaptcha/api2/anchor?k=x&size=invisible" width="256" height="60" style="position:fixed;right:0;bottom:0;border:0"></iframe>`);
         window.__captchaClicks = 0;
         window.__comp = comp;
+        // Nitro Type's race server: an event emitter ("update" etc.).
+        const listeners = {};
+        if (params.get("server") !== "none") {
+          comp.server = {
+            on(event, fn) {
+              (listeners[event] ||= []).push(fn);
+            },
+          };
+        }
+        const emit = (event, payload) => (listeners[event] || []).forEach((fn) => fn(payload));
+        // Your account totals, saved like Nitro Type does.
+        if (!localStorage.getItem("persist:nt")) {
+          localStorage.setItem("persist:nt", JSON.stringify({ user: JSON.stringify({ money: 50000, experience: 120000, level: 11 }) }));
+        }
+        const savedUser = () => JSON.parse(JSON.parse(localStorage.getItem("persist:nt")).user);
         if (params.get("state") !== "none") {
           raceContainer.__reactFiber$mock = { type: "div", return: { type: "div", return: { type: function RaceContainer() {}, stateNode: comp } } };
         }
@@ -134,8 +154,8 @@
           const fresh = () => ({ typed: 0, skipped: 0, errors: 0, startStamp: 0, completeStamp: 0 });
           comp.state.lessonContent = text;
           comp.state.racers = [
-            { userID: ME, profile: { displayName: "Me Myself", username: "me" }, progress: fresh() },
-            ...BOTS.map((b) => ({ userID: b.userID, robot: true, profile: { displayName: b.name }, progress: fresh(), botWpm: b.wpm })),
+            { userID: ME, lane: 2, profile: { displayName: "Me Myself", username: "me" }, progress: fresh() },
+            ...BOTS.map((b, i) => ({ userID: b.userID, lane: [0, 1, 3][i], robot: true, profile: { displayName: b.name }, progress: fresh(), botWpm: b.wpm })),
           ];
           finishOrder = 0;
           clearInterval(botTimer);
@@ -154,6 +174,7 @@
                   b.place = ++finishOrder;
                 }
               }
+              emit("update", { racers: comp.state.racers });
             }, 200);
           }, countdown);
           input.focus();
@@ -275,6 +296,15 @@
             extras.push(`<div class="seasonReward">Season Reward Unlocked · Tier ${user.seasonLevel}</div>`);
           }
           result.shown_level = user.level;
+          // Updated totals: with the finishing race update right away, and in
+          // the saved state a moment later.
+          const totals = savedUser();
+          const current = { money: totals.money + money, experience: totals.experience + xp, level: user.level };
+          if (params.get("server") !== "none") {
+            self.rewards = { current };
+            emit("update", { racers: comp.state.racers });
+          }
+          setTimeout(() => localStorage.setItem("persist:nt", JSON.stringify({ user: JSON.stringify(current) })), 1500);
           result.shown_season = user.seasonLevel;
           // The results table: finishers by place, then everyone else.
           const rows = comp.state.racers
@@ -312,7 +342,7 @@
                      </div>`,
                    )
                    .join("")}</div></div>
-                 <div class="raceResults-rewards"><div>Money Earned</div><div>$${money.toLocaleString()}</div><div>Experience</div><div>+${xp} XP</div></div>
+                 ${params.get("rewards") === "hidden" ? "" : `<div class="raceResults-rewards"><div>Money Earned</div><div>$${money.toLocaleString()}</div><div>Experience</div><div>+${xp} XP</div></div>`}
                  ${extras.join("")}
                </div>`;
           setTimeout(() => after.prepend(box), 600);

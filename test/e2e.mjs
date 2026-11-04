@@ -437,6 +437,62 @@ try {
     await context.close();
   });
 
+  for (const [label, query] of [
+    ["from the race update (no rewards box)", "?rewards=hidden&countdown=300"],
+    ["from the saved state (no race updates)", "?rewards=hidden&server=none&countdown=300"],
+  ]) {
+    await test(`money & XP ${label}`, async (name) => {
+      const { context, page } = await open(query, { ...BASE, wpmMin: 150, wpmMax: 150, races: 1 });
+      await page.locator(".go").click();
+      const [r] = await waitForResults(page, 1);
+      await page.waitForTimeout(8000);
+      const [st] = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-stats")));
+      const o = st.official ?? {};
+      check(`${name}: money and XP match`, o.money === r.shown.money && o.xp === r.shown.xp, JSON.stringify({ got: [o.money, o.xp], want: [r.shown.money, r.shown.xp] }));
+      await page.waitForTimeout(500);
+      const sub = await page.locator(".result-card .rc-sub").textContent();
+      check(`${name}: shown on the result card`, sub.includes(`$${r.shown.money.toLocaleString()}`) && sub.includes(`+${r.shown.xp} XP`), sub);
+      await context.close();
+    });
+  }
+
+  await test("mini map", async (name) => {
+    const { context, page } = await open("?countdown=500&nitros=3", { ...BASE, wpmMin: 120, wpmMax: 120, races: 1, nitros: 1 });
+    await page.locator(".go").click();
+    await page.waitForTimeout(2500);
+    check(`${name}: Nitro Type's track canvas hidden`, await page.locator("canvas.race-track").evaluate((c) => c.style.display === "none"));
+    const map = page.locator(".nta-minimap");
+    check(`${name}: mini map in its place`, (await map.count()) === 1 && (await map.evaluate((el) => el.nextElementSibling?.matches("canvas.race-track"))));
+    const cars = map.locator(".car");
+    check(`${name}: a block per racer`, (await cars.count()) === 4);
+    const labels = await map.locator(".label").allTextContents();
+    check(`${name}: labelled`, labels.includes("You") && labels.includes("Speedy"), labels.join(", "));
+    const mine = map.locator(".car.me");
+    const lane = await mine.evaluate((el) => el.style.top);
+    check(`${name}: your block in your lane`, lane === "40%", lane);
+    const p1 = Number(await mine.evaluate((el) => el.style.getPropertyValue("--p")));
+    const x1 = (await mine.boundingBox()).x;
+    if (shotDir) await map.screenshot({ path: path.join(shotDir, "minimap-racing.png") });
+    await page.waitForTimeout(1500);
+    const p2 = Number(await mine.evaluate((el) => el.style.getPropertyValue("--p")));
+    const x2 = (await mine.boundingBox()).x;
+    check(`${name}: your block moves`, p2 > p1 && x2 > x1, `p ${p1} -> ${p2}`);
+    const bots = await map.locator(".car.bot").evaluateAll((els) => els.map((el) => Number(el.style.getPropertyValue("--p"))));
+    check(`${name}: bots move too`, bots.length === 3 && bots.every((v) => v > 0), bots.join(", "));
+    await waitForResults(page, 1);
+    await page.waitForTimeout(1000);
+    check(`${name}: nitro streak shown`, Number(await map.evaluate((el) => el.dataset.boosts || 0)) >= 1);
+    const finalLabels = await map.locator(".label").allTextContents();
+    check(`${name}: places at the finish`, finalLabels.some((l) => /^\d(st|nd|rd|th) · You$/.test(l)), finalLabels.join(", "));
+    if (shotDir) await map.screenshot({ path: path.join(shotDir, "minimap-finish.png") });
+
+    await page.locator('nav button[data-tab="panel"]').click();
+    await page.locator('input[data-k="miniMap"]').uncheck();
+    await page.waitForTimeout(2000);
+    check(`${name}: turning it off brings the track back`, (await map.count()) === 0 && (await page.locator("canvas.race-track").isVisible()));
+    await context.close();
+  });
+
   await test("long breaks between races", async (name) => {
     const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 200, wpmMax: 200, races: 2, breakEvery: 1, breakLenMin: 0.1, breakLenMax: 0.1 });
     await page.evaluate(() => (document.title = "Nitro Type"));
