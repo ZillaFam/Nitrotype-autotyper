@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.8.1
+// @version      3.9.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.8.1";
+  const VERSION = "3.9.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -1624,6 +1624,9 @@
     notify: false, debug: false, notifyAlways: false, alarmSound: true, notifySound: true,
     // which notifications (all need "notify" on)
     notifyRace: true, notifyLevel: true, notifySeason: true, notifySession: true, notifyMilestone: true, notifyCaptcha: true,
+    // How each notification type is delivered: off, low (chime), normal
+    // (pop-up), high (chime + pop-up), urgent (alarm + pop-up that stays).
+    levelRace: "low", levelLevel: "normal", levelSeason: "normal", levelMilestone: "high", levelSession: "high", levelCaptcha: "urgent",
     stopOnLock: false, // stop the session when the computer's screen locks
     lite: false, // Low-FPS mode: fewer panel updates, no animations
     miniMap: true, // show a mini map in place of Nitro Type's race track
@@ -1653,6 +1656,19 @@
     }
   }
 
+  // Notification types (defined here: settings need them).
+  const NOTIFY = {
+    race: { level: "levelRace", old: "notifyRace", title: "Race finished" },
+    level: { level: "levelLevel", old: "notifyLevel", title: "Level up!" },
+    season: { level: "levelSeason", old: "notifySeason", title: "Season pass" },
+    milestone: { level: "levelMilestone", old: "notifyMilestone", title: "★ Milestone" },
+    session: { level: "levelSession", old: "notifySession", title: "NT Autotyper session" },
+    captcha: { level: "levelCaptcha", old: "notifyCaptcha", title: "⚠ CAPTCHA: session stopped" },
+  };
+  // off < low (chime only) < normal (pop-up) < high (chime + pop-up) < urgent
+  // (alarm beep + a pop-up that stays on screen and re-alerts)
+  const NOTIFY_LEVELS = ["off", "low", "normal", "high", "urgent"];
+
   function normalize(raw) {
     raw = { ...raw };
     // Older versions had a single accuracy value.
@@ -1667,6 +1683,11 @@
     for (const key of ["accMin", "accMax"]) s[key] = Math.round(s[key] * 2) / 2;
     for (const key of ["breakLenMin", "breakLenMax"]) s[key] = Math.round(s[key] * 10) / 10;
     for (const key of BOOLEAN_SETTINGS) s[key] = Boolean(s[key]);
+    for (const kind of Object.values(NOTIFY)) {
+      // A type switched off in an older version stays off.
+      if (raw[kind.level] === undefined && raw[kind.old] === false) s[kind.level] = "off";
+      if (!NOTIFY_LEVELS.includes(s[kind.level])) s[kind.level] = DEFAULTS[kind.level];
+    }
     return s;
   }
 
@@ -1962,37 +1983,40 @@
   //   3 milestone          normal, marked with a star
   //   4 session done       stays on screen until you dismiss it
   //   5 captcha            stays on screen, re-alerts, plus an alarm in the page
-  const NOTIFY = {
-    race: { key: "notifyRace", title: "Race finished", priority: 1 },
-    level: { key: "notifyLevel", title: "Level up!", priority: 2 },
-    season: { key: "notifySeason", title: "Season pass", priority: 2 },
-    milestone: { key: "notifyMilestone", title: "★ Milestone", priority: 3 },
-    session: { key: "notifySession", title: "NT Autotyper session", priority: 4 },
-    captcha: { key: "notifyCaptcha", title: "⚠ CAPTCHA: session stopped", priority: 5 },
-  };
+
   function notify(type, message, { always = false } = {}) {
     const s = loadSettings();
     const kind = NOTIFY[type];
-    if (!kind || !s.notify || !s[kind.key]) return;
+    if (!kind || !s.notify) return;
+    const level = s[kind.level];
+    if (level === "off") return;
     if (!always && !s.notifyAlways && !(document.hidden || !document.hasFocus())) return;
-    showNotification(kind.title, message, `nt-autotyper-${type}`, kind.priority);
-    if (kind.priority >= 3 && kind.priority < 5 && s.notifySound) alarm.chime();
+    deliver(level, kind.title, message, `nt-autotyper-${type}`);
+  }
+
+  /** Deliver a notification at a level. Returns the pop-up's outcome via onResult. */
+  function deliver(level, title, body, tag, onResult) {
+    if (level === "low" || level === "high") alarm.chime();
+    if (level === "urgent") alarm.beep();
+    if (level === "low") return void onResult?.("chime only");
+    showNotification(title, body, tag, level, onResult);
   }
 
   // Notifications are kept referenced until Chrome reports on them, so none
   // gets cleaned up before it's shown. Only the options a priority needs are
   // set: plain ones are as plain as possible (some setups mishandle extras).
   const liveNotifications = new Set();
-  function showNotification(title, body, tag, priority = 2, onResult) {
+  function showNotification(title, body, tag, level = "normal", onResult) {
     if (!("Notification" in window) || Notification.permission !== "granted") {
       onResult?.("not allowed");
       return false;
     }
     try {
       const options = { body, tag };
-      if (priority <= 1) options.silent = true; // races: no sound
-      if (priority >= 4) options.requireInteraction = true; // session done, captcha: stay until dismissed
-      if (priority >= 5) options.renotify = true; // captcha: alert again even with the same tag
+      if (level === "urgent") {
+        options.requireInteraction = true; // stays until dismissed
+        options.renotify = true; // alerts again even with the same tag
+      }
       const n = new Notification(title, options);
       liveNotifications.add(n);
       const done = (result) => {
@@ -2064,7 +2088,7 @@
       }
     },
     beep() {
-      if (!loadSettings().alarmSound || !this.audio) return;
+      if (!this.audio) return;
       try {
         const ctx = this.audio;
         const t0 = ctx.currentTime + 0.02;
@@ -2093,8 +2117,8 @@
         if (!this.on) return;
         this.count++;
         notify("captcha", test ? "TEST: this is what a captcha alert looks like." : CAPTCHA_TEXT_BODY, { always: true });
-        this.beep();
-        if (this.count < ALARM_MAX) this.timer = timers.set(ring, ALARM_REPEAT_MS);
+        // Urgent rings again every minute; lower levels alert once.
+        if (loadSettings().levelCaptcha === "urgent" && this.count < ALARM_MAX) this.timer = timers.set(ring, ALARM_REPEAT_MS);
       };
       ring();
       // Flash the tab title.
@@ -2469,6 +2493,17 @@
     .sub-checks { display: grid; gap: 7px; padding-left: 22px; }
     .sub-checks.off { opacity: .45; pointer-events: none; }
     .notify-test { display: grid; gap: 6px; }
+    .levels-hint { color: var(--sub); font-size: 11px; }
+    .nrow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; }
+    .nname { font-size: 12.5px; }
+    .nname small { display: block; color: var(--sub); font-size: 11px; }
+    .nrow select {
+      padding: 3px 4px; border-radius: 7px; border: 1px solid var(--line);
+      background: var(--bg); color: var(--text); font: inherit; font-size: 12px;
+    }
+    .nrow select:focus { outline: none; border-color: var(--accent); }
+    .try { all: unset; cursor: pointer; color: var(--sub); padding: 3px 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; }
+    .try:hover, .try:focus-visible { color: var(--text); border-color: var(--sub); }
     .prio { font-style: normal; font-size: 10px; font-weight: 700; padding: 0 6px; border-radius: 99px; margin-left: 4px; vertical-align: 1px; }
     .prio.p1 { background: #2b3762; color: #8e9cc9; }
     .prio.p2 { background: #24406a; color: #9cc3ff; }
@@ -2612,14 +2647,25 @@
             <hr class="sep">
             <label class="check"><input type="checkbox" data-k="notify"><span>Desktop notifications<small class="notify-hint">Only when you're not looking at the tab (captchas always).</small></span></label>
             <div class="sub-checks">
-              <label class="check"><input type="checkbox" data-k="notifyCaptcha"><span>Captcha <i class="prio p5">urgent</i><small>Stays on screen, alarm beep, flashing tab, repeats every minute</small></span></label>
-              <label class="check"><input type="checkbox" data-k="notifySession"><span>Session done <i class="prio p4">high</i><small>Stays on screen. Totals: races, WPM, wins, money, XP</small></span></label>
-              <label class="check"><input type="checkbox" data-k="notifyMilestone"><span>Milestones <i class="prio p3">medium</i><small>Personal best WPM, win streaks</small></span></label>
-              <label class="check"><input type="checkbox" data-k="notifyLevel"><span>Level ups <i class="prio p2">normal</i></span></label>
-              <label class="check"><input type="checkbox" data-k="notifySeason"><span>Season pass rewards <i class="prio p2">normal</i></span></label>
-              <label class="check"><input type="checkbox" data-k="notifyRace"><span>After each race <i class="prio p1">low</i><small>Silent. Place, WPM, accuracy, money, XP</small></span></label>
-              <label class="check"><input type="checkbox" data-k="alarmSound"><span>Alarm sound for captchas</span></label>
-              <label class="check"><input type="checkbox" data-k="notifySound"><span>Chime for milestones and session done<small>You hear it even if your computer hides the pop-up.</small></span></label>
+              <div class="levels-hint">Low: chime · Normal: pop-up · High: chime + pop-up · Urgent: alarm + pop-up that stays</div>
+              ${[
+                ["levelCaptcha", "captcha", "Captcha", "Session stopped. Urgent repeats every minute."],
+                ["levelSession", "session", "Session done", "Races, WPM, wins, money, XP"],
+                ["levelMilestone", "milestone", "Milestones", "Personal best, win streaks"],
+                ["levelLevel", "level", "Level ups", ""],
+                ["levelSeason", "season", "Season pass rewards", ""],
+                ["levelRace", "race", "After each race", "Place, WPM, accuracy, money, XP"],
+              ]
+                .map(
+                  ([key, type, label, note]) => `<div class="nrow">
+                    <span class="nname">${label}${note ? `<small>${note}</small>` : ""}</span>
+                    <select data-k="${key}" aria-label="${label}">
+                      <option value="off">Off</option><option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option>
+                    </select>
+                    <button class="try" data-try="${type}" title="Try this level">▶</button>
+                  </div>`,
+                )
+                .join("")}
               <label class="check"><input type="checkbox" data-k="notifyAlways"><span>Also when I'm looking at the tab</span></label>
             </div>
             <div class="notify-test"><button class="btn2 test-notify">Send a test notification</button><button class="btn2 test-alarm">Test the captcha alert</button><small class="notify-status"></small></div>
@@ -2846,6 +2892,24 @@
               ? "This browser can't show desktop notifications."
               : "Not allowed yet: the test button will ask.";
     }
+    for (const btn of $$(".try")) {
+      btn.addEventListener("click", async () => {
+        if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission().catch(() => {});
+        alarm.unlock();
+        const type = btn.dataset.try;
+        btn.blur();
+        if (type === "captcha") return void $(".test-alarm").click();
+        const level = settings[NOTIFY[type].level];
+        const status = $(".notify-status");
+        if (level === "off") {
+          status.textContent = `${NOTIFY[type].title}: set to Off, so nothing happens.`;
+          return;
+        }
+        deliver(level, NOTIFY[type].title, `Test: this is the ${level} level.`, `nt-autotyper-try-${type}`, (result) => {
+          status.textContent = `${NOTIFY[type].title} at ${level}: ${result === "chime only" ? "a chime, no pop-up." : result === "shown" ? (level === "high" ? "a chime and a pop-up." : "a pop-up.") : `pop-up ${result}.`}`;
+        });
+      });
+    }
     $(".test-alarm").addEventListener("click", async () => {
       if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission().catch(() => {});
       alarm.unlock();
@@ -2876,7 +2940,7 @@
       showNotifyStatus();
       status.textContent += " Sending…";
       const result = await new Promise((resolve) => {
-        showNotification("NT Autotyper", "Test: notifications are working.", `nt-autotyper-test-${Date.now()}`, 2, resolve);
+        showNotification("NT Autotyper", "Test: notifications are working.", `nt-autotyper-test-${Date.now()}`, "normal", resolve);
         timers.set(() => resolve("no reply"), 4000);
       });
       alarm.chime();

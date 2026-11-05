@@ -297,19 +297,42 @@ try {
     await context.close();
   });
 
-  await test("notification priorities", async (name) => {
-    const { context, page } = await open("?levelup=1&countdown=300", { ...BASE, wpmMin: 200, wpmMax: 200, races: 1, notify: true, notifyAlways: true }, null, () => {
+  // Each type at the level you pick: off, low (chime), normal (pop-up),
+  // high (chime + pop-up), urgent (alarm + pop-up that stays).
+  await test("notification levels", async (name) => {
+    const settings = {
+      ...BASE, wpmMin: 200, wpmMax: 200, races: 1, notify: true, notifyAlways: true,
+      levelRace: "low", levelLevel: "normal", levelSeason: "off", levelMilestone: "high", levelSession: "urgent",
+    };
+    const { context, page } = await open("?levelup=1&season=1&countdown=300", settings, null, () => {
       window.__notes = [];
       window.__noteOpts = [];
+      window.__sounds = [];
       window.Notification = class {
         static permission = "granted";
         static requestPermission = async () => "granted";
         constructor(title, opts) {
           window.__notes.push(`${title}: ${opts?.body}`);
           window.__noteOpts.push({ title, ...opts });
-          this.title = title;
+          window.__sounds.push(`pop:${title}`);
         }
         close() {}
+      };
+      // Record chimes (sine) and alarm beeps (square) in order with the pop-ups.
+      window.AudioContext = class {
+        constructor() {
+          this.currentTime = 0;
+          this.destination = {};
+        }
+        resume() {}
+        createGain() {
+          return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: (x) => x };
+        }
+        createOscillator() {
+          const osc = { frequency: {}, connect: (x) => x, stop() {} };
+          osc.start = () => window.__sounds.push(osc.type === "sine" ? "chime" : "beep");
+          return osc;
+        }
       };
       if (!localStorage.getItem("nt-autotyper-stats")) {
         const old = Array.from({ length: 5 }, (_, i) => ({ wpm: 60, accuracy: 95, at: Date.now() - 86400000 + i, target: 60 }));
@@ -319,16 +342,49 @@ try {
     await page.locator(".go").click();
     await waitForResults(page, 1);
     await page.waitForTimeout(8000);
+    const notes = await page.evaluate(() => window.__notes);
     const opts = await page.evaluate(() => window.__noteOpts);
-    const byTitle = (t) => opts.find((o) => o.title === t) ?? {};
-    const race = byTitle("Race finished");
-    const level = byTitle("Level up!");
-    const milestone = byTitle("★ Milestone");
+    const sounds = (await page.evaluate(() => window.__sounds)).join(" ");
+    const byTitle = (t) => opts.find((o) => o.title === t);
+    check(`${name}: race at Low: a chime, no pop-up`, !byTitle("Race finished") && sounds.startsWith("chime chime"), sounds);
+    check(`${name}: level up at Normal: a pop-up, no sound`, Boolean(byTitle("Level up!")) && /chime chime pop:Level up!/.test(sounds) && !/(chime|beep) pop:Level up!/.test(sounds.replace(/^chime chime /, "")), sounds);
+    check(`${name}: season pass at Off: nothing`, !notes.some((n) => n.startsWith("Season pass")));
+    check(`${name}: milestone at High: chime + pop-up`, /chime chime pop:★ Milestone/.test(sounds) && !byTitle("★ Milestone").requireInteraction, sounds);
     const session = byTitle("NT Autotyper session");
-    check(`${name}: race (low): silent`, race.silent === true && !race.requireInteraction, JSON.stringify(race));
-    check(`${name}: level up (normal): with sound, goes away by itself`, !level.silent && !level.requireInteraction && !level.icon, JSON.stringify(level));
-    check(`${name}: milestone (medium): with sound, starred`, !milestone.silent && !milestone.requireInteraction, JSON.stringify(milestone));
-    check(`${name}: session done (high): stays on screen`, session.requireInteraction === true && !session.renotify, JSON.stringify(session));
+    check(`${name}: session done at Urgent: alarm + pop-up that stays`, /beep beep beep pop:NT Autotyper session/.test(sounds) && session?.requireInteraction === true && session?.renotify === true, JSON.stringify(session));
+    await context.close();
+  });
+
+  await test("notification levels: panel", async (name) => {
+    const { context, page } = await open("", { ...BASE, notify: true, notifyRace: false }, null, () => {
+      window.__notes = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+          setTimeout(() => this.onshow?.(), 30);
+        }
+        close() {}
+      };
+    });
+    await page.locator('nav button[data-tab="panel"]').click();
+    const value = (k) => page.locator(`select[data-k="${k}"]`).inputValue();
+    check(
+      `${name}: defaults (old "after each race" switch off stays off)`,
+      (await value("levelCaptcha")) === "urgent" && (await value("levelSession")) === "high" && (await value("levelMilestone")) === "high" &&
+        (await value("levelLevel")) === "normal" && (await value("levelSeason")) === "normal" && (await value("levelRace")) === "off",
+    );
+    await page.locator('select[data-k="levelLevel"]').selectOption("high");
+    await page.locator('.try[data-try="level"]').click();
+    await page.waitForTimeout(400);
+    check(`${name}: ▶ tries the chosen level`, (await page.locator(".notify-status").textContent()) === "Level up! at high: a chime and a pop-up.", await page.locator(".notify-status").textContent());
+    check(`${name}: and sends the pop-up`, (await page.evaluate(() => window.__notes)).includes("Level up!: Test: this is the high level."));
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-levels.png") });
+    await page.reload();
+    await page.waitForSelector(".go", { state: "attached" });
+    await page.locator('nav button[data-tab="panel"]').click();
+    check(`${name}: choice remembered`, (await value("levelLevel")) === "high");
     await context.close();
   });
 
@@ -359,7 +415,7 @@ try {
   await test("notifications: race, level, season, milestone, session", async (name) => {
     const { context, page } = await open(
       "?levelup=1&season=1&countdown=500",
-      { ...BASE, wpmMin: 150, wpmMax: 150, accuracy: 97, races: 2, notify: true },
+      { ...BASE, wpmMin: 150, wpmMax: 150, accuracy: 97, races: 2, notify: true, levelRace: "normal" },
       null,
       () => {
         // A background tab, with five earlier races at 60 WPM (so 150 is a personal best).
@@ -706,7 +762,7 @@ try {
   }
 
   await test("background tab (throttled page timers)", async (name) => {
-    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, accuracy: 97, races: 2, nitros: 0, notify: true }, null, simulateBackgroundTab);
+    const { context, page } = await open("?countdown=500", { ...BASE, wpmMin: 120, wpmMax: 120, accuracy: 97, races: 2, nitros: 0, notify: true, levelRace: "normal" }, null, simulateBackgroundTab);
     await page.evaluate(() => {
       document.title = "Nitro Type";
     });
