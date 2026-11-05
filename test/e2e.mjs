@@ -388,6 +388,103 @@ try {
     await context.close();
   });
 
+  await test("notifications every time, even when you're looking", async (name) => {
+    const { context, page } = await open("?countdown=300", { ...BASE, wpmMin: 200, wpmMax: 200, races: 2, notify: true, levelRace: "normal" }, null, () => {
+      window.__notes = [];
+      window.__noteOpts = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+          window.__noteOpts.push({ title, ...opts });
+          setTimeout(() => this.onshow?.(), 30);
+        }
+        close() {}
+      };
+    });
+    await page.locator(".go").click();
+    await waitForResults(page, 2, 90000);
+    await page.waitForTimeout(3000);
+    const opts = (await page.evaluate(() => window.__noteOpts)).filter((o) => o.title === "Race finished");
+    check(`${name}: a pop-up for each race, with the tab in view`, opts.length === 2, JSON.stringify(opts.map((o) => o.body)));
+    check(`${name}: a fresh tag each time (so none is silently replaced)`, opts.length === 2 && opts[0].tag !== opts[1].tag, JSON.stringify(opts.map((o) => o.tag)));
+    const toasts = await page.locator(".toast").allTextContents();
+    check(`${name}: also a pop-up on the page itself`, toasts.some((t) => t.startsWith("Race finished")), toasts.join(" | "));
+    if (shotDir) await page.screenshot({ path: path.join(shotDir, "toasts.png"), clip: { x: 800, y: 0, width: 400, height: 260 } });
+    await context.close();
+  });
+
+  await test("page pop-ups: normal goes away, urgent stays", async (name) => {
+    const { context, page } = await open("", { ...BASE, notify: true, levelLevel: "normal" }, null, () => {
+      window.__notes = [];
+      window.__noteOpts = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+          window.__noteOpts.push({ title, ...opts });
+          setTimeout(() => this.onshow?.(), 30);
+        }
+        close() {}
+      };
+    });
+    await page.locator('nav button[data-tab="panel"]').click();
+    await page.locator('.try[data-try="level"]').click();
+    await page.locator(".test-alarm").click();
+    await page.waitForTimeout(500);
+    check(`${name}: both shown`, (await page.locator(".toast.normal").count()) === 1 && (await page.locator(".toast.urgent").count()) === 1);
+    await page.waitForTimeout(9000);
+    check(`${name}: normal gone after a few seconds, urgent still there`, (await page.locator(".toast.normal").count()) === 0 && (await page.locator(".toast.urgent").count()) === 1);
+    await page.locator(".toast.urgent button").click();
+    check(`${name}: urgent closes with ✕`, (await page.locator(".toast.urgent").count()) === 0);
+    await context.close();
+  });
+
+  await test("sound blocked after a reload: says so, a click fixes it", async (name) => {
+    const { context, page } = await open("", { ...BASE, notify: true, levelRace: "low" }, null, () => {
+      // Like a browser before any click on the page: audio stays suspended.
+      window.__chimes = 0;
+      window.AudioContext = class {
+        constructor() {
+          this.state = "suspended";
+          this.currentTime = 0;
+          this.destination = {};
+        }
+        resume() {
+          if (window.__activated) this.state = "running";
+          return Promise.resolve();
+        }
+        createGain() {
+          return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: (x) => x };
+        }
+        createOscillator() {
+          return { frequency: {}, connect: (x) => x, start: () => window.__chimes++, stop() {} };
+        }
+      };
+    });
+    await page.locator('nav button[data-tab="panel"]').click();
+    // Pressed without the browser allowing sound yet:
+    await page.evaluate(() => {
+      const shadow = [...document.querySelectorAll("body > div")].find((d) => d.shadowRoot?.querySelector(".box")).shadowRoot;
+      shadow.querySelector('.try[data-try="race"]').dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await page.waitForTimeout(1200);
+    check(`${name}: no sound yet`, (await page.evaluate(() => window.__chimes)) === 0);
+    const toasts = await page.locator(".toast").allTextContents();
+    check(`${name}: a pop-up says to click once`, toasts.some((t) => t.startsWith("Sound is off for now")), toasts.join(" | "));
+    check(`${name}: the panel says so too`, (await page.locator(".sound-state").textContent()).startsWith("Sound: blocked"), await page.locator(".sound-state").textContent());
+    // A real click on the page:
+    await page.evaluate(() => (window.__activated = true));
+    await page.mouse.click(700, 400);
+    await page.locator('.try[data-try="race"]').click();
+    await page.waitForTimeout(800);
+    check(`${name}: after a click, the chime plays`, (await page.evaluate(() => window.__chimes)) === 2);
+    check(`${name}: and the panel says sound is on`, (await page.locator(".sound-state").textContent()) === "Sound: on.", await page.locator(".sound-state").textContent());
+    await context.close();
+  });
+
   await test("captcha alert test button", async (name) => {
     const { context, page } = await open("", { ...BASE, notify: true }, null, () => {
       window.__notes = [];
@@ -536,7 +633,7 @@ try {
     await page.waitForTimeout(2500);
     check(`${name}: says so`, (await status(page)) === "Disqualified. Next race soon…", await status(page));
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: notification`, notes.includes("Race finished: Disqualified for inactivity. Going on to the next race."), JSON.stringify(notes));
+    check(`${name}: notification`, notes.includes("⚠ NT Autotyper: Disqualified for inactivity. Going on to the next race."), JSON.stringify(notes));
     const [r] = await waitForResults(page, 1, 60000);
     check(`${name}: pressed Race Again (not the garage) and raced`, r.correct > 100 && (await page.evaluate(() => window.__garageClicks)) === 0);
     await page.waitForTimeout(1500);

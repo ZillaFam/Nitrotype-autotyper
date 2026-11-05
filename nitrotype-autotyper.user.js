@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.9.0
+// @version      3.10.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.9.0";
+  const VERSION = "3.10.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -1626,7 +1626,7 @@
     notifyRace: true, notifyLevel: true, notifySeason: true, notifySession: true, notifyMilestone: true, notifyCaptcha: true,
     // How each notification type is delivered: off, low (chime), normal
     // (pop-up), high (chime + pop-up), urgent (alarm + pop-up that stays).
-    levelRace: "low", levelLevel: "normal", levelSeason: "normal", levelMilestone: "high", levelSession: "high", levelCaptcha: "urgent",
+    levelRace: "low", levelLevel: "normal", levelSeason: "normal", levelMilestone: "high", levelSession: "high", levelCaptcha: "urgent", levelProblem: "high",
     stopOnLock: false, // stop the session when the computer's screen locks
     lite: false, // Low-FPS mode: fewer panel updates, no animations
     miniMap: true, // show a mini map in place of Nitro Type's race track
@@ -1664,6 +1664,8 @@
     milestone: { level: "levelMilestone", old: "notifyMilestone", title: "★ Milestone" },
     session: { level: "levelSession", old: "notifySession", title: "NT Autotyper session" },
     captcha: { level: "levelCaptcha", old: "notifyCaptcha", title: "⚠ CAPTCHA: session stopped" },
+    // Disqualified, logged out, computer asleep, keys not accepted, ...
+    problem: { level: "levelProblem", old: "notifySession", title: "⚠ NT Autotyper" },
   };
   // off < low (chime only) < normal (pop-up) < high (chime + pop-up) < urgent
   // (alarm beep + a pop-up that stays on screen and re-alerts)
@@ -1750,7 +1752,7 @@
         this.stop("Stopped: disqualified twice in a row");
         return;
       }
-      notify("race", "Disqualified for inactivity. Going on to the next race.");
+      notify("problem", "Disqualified for inactivity. Going on to the next race.");
       this.say("Disqualified. Next race soon…");
       timers.clear(this.nextTimer);
       this.nextTimer = timers.set(() => this.state.active && toEngines({ cmd: "leaveDq" }), rand(3000, 6000));
@@ -1796,7 +1798,7 @@
         timers.clear(this.summaryTimer);
         this.summaryTimer = timers.set(() => this.sendSummary(), 6000);
       } else if (!silent && wasActive && !message.includes("you pressed")) {
-        notify("session", message);
+        notify("problem", message);
       }
       this.say(message);
     },
@@ -1984,22 +1986,30 @@
   //   4 session done       stays on screen until you dismiss it
   //   5 captcha            stays on screen, re-alerts, plus an alarm in the page
 
-  function notify(type, message, { always = false } = {}) {
+  // Every time, whether or not you're looking at the tab.
+  function notify(type, message) {
     const s = loadSettings();
     const kind = NOTIFY[type];
     if (!kind || !s.notify) return;
     const level = s[kind.level];
     if (level === "off") return;
-    if (!always && !s.notifyAlways && !(document.hidden || !document.hasFocus())) return;
     deliver(level, kind.title, message, `nt-autotyper-${type}`);
   }
 
-  /** Deliver a notification at a level. Returns the pop-up's outcome via onResult. */
+  /**
+   * Deliver a notification at a level: the sound, the system pop-up, and a
+   * pop-up inside the page (seen even in full screen, where the system may
+   * hide its own). Returns the system pop-up's outcome via onResult.
+   */
+  let noteSeq = 0;
   function deliver(level, title, body, tag, onResult) {
     if (level === "low" || level === "high") alarm.chime();
     if (level === "urgent") alarm.beep();
     if (level === "low") return void onResult?.("chime only");
-    showNotification(title, body, tag, level, onResult);
+    panel.toast?.(level, title, body);
+    // A fresh tag every time: reusing one makes the system quietly replace
+    // the previous notification instead of popping up a new one.
+    showNotification(title, body, `${tag}-${Date.now()}-${++noteSeq}`, level, onResult);
   }
 
   // Notifications are kept referenced until Chrome reports on them, so none
@@ -2057,15 +2067,53 @@
     audio: null,
     // Browsers only allow sound after a click on the page; Start is one.
     unlock() {
+      this.ready();
+    },
+    /**
+     * Make sure sound can play, then run play(). Browsers only allow sound
+     * after a click on the page; after a reload that has to happen again, so
+     * this retries every time and says so (once) if it's still blocked.
+     */
+    ready(play) {
       try {
         this.audio ??= new (window.AudioContext || window.webkitAudioContext)();
-        this.audio.resume?.();
       } catch {
         this.audio = null;
+        return;
       }
+      const running = () => !this.audio.state || this.audio.state === "running";
+      const unblock = () => {
+        if (this.blocked) {
+          this.blocked = false;
+          panel.render?.();
+        }
+      };
+      if (running()) {
+        unblock();
+        play?.();
+        return;
+      }
+      const resumed = Promise.resolve(this.audio.resume?.()).catch(() => {});
+      const timeout = new Promise((r) => timers.set(r, 600));
+      Promise.race([resumed, timeout]).then(() => {
+        if (running()) {
+          unblock();
+          play?.();
+        } else if (play) {
+          this.blocked = true;
+          if (!this.toldBlocked) {
+            this.toldBlocked = true;
+            panel.toast?.("high", "Sound is off for now", "Your browser needs one click on this page before it allows sound. Click anywhere here (the panel counts).");
+          }
+          panel.render?.();
+        }
+      });
     },
     // A soft two-note chime for milestones and session done.
     chime() {
+      this.ready(() => this.chimeNow());
+    },
+    chimeNow() {
       if (!this.audio) return;
       try {
         const ctx = this.audio;
@@ -2088,6 +2136,9 @@
       }
     },
     beep() {
+      this.ready(() => this.beepNow());
+    },
+    beepNow() {
       if (!this.audio) return;
       try {
         const ctx = this.audio;
@@ -2142,6 +2193,11 @@
       panel.render();
     },
   };
+  // Any real click or key press on the page lets the browser allow sound.
+  for (const type of ["pointerdown", "keydown"]) {
+    listen(window, type, (e) => e.isTrusted && alarm.ready(), true);
+  }
+
   // Back at the tab: you've seen it, stop ringing (the message stays).
   listen(document, "visibilitychange", () => {
     if (!document.hidden && alarm.on) timers.set(() => !document.hidden && alarm.stop(), 3000);
@@ -2493,6 +2549,25 @@
     .sub-checks { display: grid; gap: 7px; padding-left: 22px; }
     .sub-checks.off { opacity: .45; pointer-events: none; }
     .notify-test { display: grid; gap: 6px; }
+    /* pop-ups inside the page: top right, above everything (full screen too) */
+    .toasts {
+      position: fixed; top: 16px; right: 16px; z-index: 3; width: min(340px, calc(100vw - 32px));
+      display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+      font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    .toast {
+      pointer-events: auto; display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: start;
+      padding: 10px 12px; border-radius: 12px; color: #e8edff; background: #1c2547; border: 1px solid #2b3762;
+      border-left: 4px solid #5d8bf4; box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+      animation: toast-in .18s ease-out;
+    }
+    .toast.high { border-left-color: #f5a623; }
+    .toast.urgent { border-left-color: #ff5c6c; background: #3a1820; border-color: #6a1f2a; }
+    .toast b { font-size: 13.5px; }
+    .toast p { grid-column: 1; margin: 0; color: #c3cbe6; }
+    .toast button { all: unset; cursor: pointer; grid-row: 1 / span 2; grid-column: 2; color: #8e9cc9; padding: 0 4px; font-size: 15px; }
+    .toast button:hover { color: #fff; }
+    @keyframes toast-in { from { transform: translateY(-8px); opacity: 0; } }
     .levels-hint { color: var(--sub); font-size: 11px; }
     .nrow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; }
     .nname { font-size: 12.5px; }
@@ -2645,11 +2720,12 @@
             <label class="check"><input type="checkbox" data-k="lite"><span>Low-FPS mode<small>For slow computers: no animations, no live standings, and the panel updates once a second.</small></span></label>
             <button class="btn2 reset-panel">Reset position and size</button>
             <hr class="sep">
-            <label class="check"><input type="checkbox" data-k="notify"><span>Desktop notifications<small class="notify-hint">Only when you're not looking at the tab (captchas always).</small></span></label>
+            <label class="check"><input type="checkbox" data-k="notify"><span>Notifications<small class="notify-hint">Every time: a system pop-up, plus a pop-up on this page (seen even in full screen).</small></span></label>
             <div class="sub-checks">
               <div class="levels-hint">Low: chime · Normal: pop-up · High: chime + pop-up · Urgent: alarm + pop-up that stays</div>
               ${[
                 ["levelCaptcha", "captcha", "Captcha", "Session stopped. Urgent repeats every minute."],
+                ["levelProblem", "problem", "Problems", "Disqualified, logged out, asleep, stuck"],
                 ["levelSession", "session", "Session done", "Races, WPM, wins, money, XP"],
                 ["levelMilestone", "milestone", "Milestones", "Personal best, win streaks"],
                 ["levelLevel", "level", "Level ups", ""],
@@ -2666,8 +2742,8 @@
                   </div>`,
                 )
                 .join("")}
-              <label class="check"><input type="checkbox" data-k="notifyAlways"><span>Also when I'm looking at the tab</span></label>
             </div>
+            <div class="hint sound-state"></div>
             <div class="notify-test"><button class="btn2 test-notify">Send a test notification</button><button class="btn2 test-alarm">Test the captcha alert</button><small class="notify-status"></small></div>
             <label class="check"><input type="checkbox" data-k="stopOnLock"><span>Stop when my screen locks<small class="lock-hint">Chrome asks for permission once.</small></span></label>
             <label class="check"><input type="checkbox" data-k="debug"><span>Debug view<small>Shows what the script sees on the page. Copy it and send it over if something breaks.</small></span></label>
@@ -2683,6 +2759,7 @@
         </div>
       </div>
     </div>
+    <div class="toasts" aria-live="polite"></div>
     <div class="focus" hidden>
       <div class="f-top">
         <span class="f-brand">NT Autotyper</span><span class="f-count"></span>
@@ -2820,6 +2897,22 @@
       focusRace(); // keys go to the race, not our buttons
     }
     panel.closeFocus = () => setFocusView(false);
+
+    // ---- pop-ups inside the page -----------------------------------------
+    const toastBox = $(".toasts");
+    panel.toast = (level, title, body) => {
+      const el = document.createElement("div");
+      el.className = `toast ${level}`;
+      setHTML(el, `<b></b><button title="Dismiss" aria-label="Dismiss">✕</button><p></p>`);
+      el.querySelector("b").textContent = title;
+      el.querySelector("p").textContent = body;
+      el.querySelector("button").addEventListener("click", () => el.remove());
+      el.addEventListener("click", () => window.focus());
+      toastBox.prepend(el);
+      while (toastBox.children.length > 4) toastBox.lastChild.remove();
+      // Urgent ones stay until you close them; the rest go away by themselves.
+      if (level !== "urgent") timers.set(() => el.remove(), level === "high" ? 12000 : 8000);
+    };
     panel.focusOpen = () => !focusEl.hidden;
     $(".focus-btn").addEventListener("click", () => setFocusView(true));
     $(".f-close").addEventListener("click", () => setFocusView(false));
@@ -3049,6 +3142,13 @@
       const typing = Boolean(live?.running);
       box.classList.toggle("running", active || typing);
       box.classList.toggle("alarm", alarm.on); // captcha: red panel
+      const soundState = $(".sound-state");
+      if (soundState) {
+        setText(
+          soundState,
+          alarm.blocked ? "Sound: blocked until you click anywhere on this page (browsers need one click after a reload)." : alarm.audio ? "Sound: on." : "Sound: turns on with your first click on this page.",
+        );
+      }
 
       // Whichever spoke last: the engine typing the race, or the session.
       $(".status").textContent = live && (typing || live.at > session.messageAt) ? live.message : session.message;
