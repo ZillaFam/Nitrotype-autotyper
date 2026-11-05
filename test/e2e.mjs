@@ -278,7 +278,7 @@ try {
     check(`${name}: notification (even with the tab in view)`, notes.length === 1 && notes[0].startsWith("⚠ CAPTCHA: session stopped: "), JSON.stringify(notes));
     check(`${name}: never clicks the captcha`, (await page.evaluate(() => window.__captchaClicks)) === 0);
     const opts = (await page.evaluate(() => window.__noteOpts))[0];
-    check(`${name}: urgent: stays on screen and re-alerts`, opts.requireInteraction === true && opts.renotify === true && opts.silent === false, JSON.stringify(opts));
+    check(`${name}: urgent: stays on screen and re-alerts`, opts.requireInteraction === true && opts.renotify === true && !opts.silent, JSON.stringify(opts));
     check(`${name}: alarm beeps`, (await page.evaluate(() => window.__beeps)) >= 3);
     check(`${name}: panel turns red`, (await page.locator(".box.alarm").count()) === 1);
     const titles = new Set();
@@ -325,10 +325,10 @@ try {
     const level = byTitle("Level up!");
     const milestone = byTitle("★ Milestone");
     const session = byTitle("NT Autotyper session");
-    check(`${name}: race (low): silent`, race.silent === true && race.requireInteraction === false, JSON.stringify(race));
-    check(`${name}: level up (normal): with sound, goes away by itself`, level.silent === false && level.requireInteraction === false, JSON.stringify(level));
-    check(`${name}: milestone (medium): with sound, starred`, milestone.silent === false && milestone.requireInteraction === false, JSON.stringify(milestone));
-    check(`${name}: session done (high): stays on screen`, session.requireInteraction === true && session.renotify === false, JSON.stringify(session));
+    check(`${name}: race (low): silent`, race.silent === true && !race.requireInteraction, JSON.stringify(race));
+    check(`${name}: level up (normal): with sound, goes away by itself`, !level.silent && !level.requireInteraction && !level.icon, JSON.stringify(level));
+    check(`${name}: milestone (medium): with sound, starred`, !milestone.silent && !milestone.requireInteraction, JSON.stringify(milestone));
+    check(`${name}: session done (high): stays on screen`, session.requireInteraction === true && !session.renotify, JSON.stringify(session));
     await context.close();
   });
 
@@ -515,26 +515,36 @@ try {
     await context.close();
   });
 
-  await test("notification test button", async (name) => {
-    const { context, page } = await open("", { ...BASE, notify: true }, null, () => {
-      window.__notes = [];
-      window.Notification = class {
-        static permission = "granted";
-        static requestPermission = async () => "granted";
-        constructor(title, opts) {
-          window.__notes.push(`${title}: ${opts?.body}`);
-          (window.__noteOpts ||= []).push({ title, ...opts });
-        }
-      };
+  // The test button reports what the browser did with the notification.
+  for (const [outcome, expectStart] of [
+    ["shown", "Chrome says it showed the notification"],
+    ["error", "Chrome couldn't show it"],
+    ["silence", "Chrome didn't confirm it showed the notification"],
+  ]) {
+    await test(`notification test button: ${outcome}`, async (name) => {
+      const { context, page } = await open("", { ...BASE, notify: true }, null, `(${(o) => {
+        window.__notes = [];
+        window.Notification = class {
+          static permission = "granted";
+          static requestPermission = async () => "granted";
+          constructor(title, opts) {
+            window.__notes.push(`${title}: ${opts?.body}`);
+            setTimeout(() => (o === "shown" ? this.onshow?.() : o === "error" ? this.onerror?.(new Event("error")) : null), 50);
+          }
+          close() {}
+        };
+      }})(${JSON.stringify(outcome)})`);
+      await page.locator('nav button[data-tab="panel"]').click();
+      check(`${name}: shows the permission state`, (await page.locator(".notify-status").textContent()).startsWith("Your browser allows notifications"), await page.locator(".notify-status").textContent());
+      await page.locator(".test-notify").click();
+      await page.waitForTimeout(outcome === "silence" ? 4500 : 600);
+      const notes = await page.evaluate(() => window.__notes);
+      check(`${name}: sends one`, notes.length === 1 && notes[0] === "NT Autotyper: Test: notifications are working.", JSON.stringify(notes));
+      const text = await page.locator(".notify-status").textContent();
+      check(`${name}: says what happened and where to look`, text.startsWith(expectStart), text);
+      await context.close();
     });
-    await page.locator('nav button[data-tab="panel"]').click();
-    check(`${name}: shows the permission state`, (await page.locator(".notify-status").textContent()).startsWith("Your browser allows notifications"), await page.locator(".notify-status").textContent());
-    await page.locator(".test-notify").click();
-    const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: sends one right away`, notes.length === 1 && notes[0] === "NT Autotyper: Test: notifications are working.", JSON.stringify(notes));
-    check(`${name}: says where to look if nothing popped up`, (await page.locator(".notify-status").textContent()).includes("Sent!"));
-    await context.close();
-  });
+  }
 
   for (const [label, query] of [
     ["from the race update (no rewards box)", "?rewards=hidden&countdown=300"],

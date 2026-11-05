@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.8.0
+// @version      3.8.1
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.8.0";
+  const VERSION = "3.8.1";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -1621,7 +1621,7 @@
   const DEFAULTS = {
     wpmMin: 80, wpmMax: 95, accMin: 96, accMax: 98, variance: 25, nitros: 1, races: 5,
     breakEvery: 0, breakLenMin: 1, breakLenMax: 3, // long break every ~N races (0 = off), minutes
-    notify: false, debug: false, notifyAlways: false, alarmSound: true,
+    notify: false, debug: false, notifyAlways: false, alarmSound: true, notifySound: true,
     // which notifications (all need "notify" on)
     notifyRace: true, notifyLevel: true, notifySeason: true, notifySession: true, notifyMilestone: true, notifyCaptcha: true,
     stopOnLock: false, // stop the session when the computer's screen locks
@@ -1629,7 +1629,7 @@
     miniMap: true, // show a mini map in place of Nitro Type's race track
     keepAlive: true, // keep Nitro Type's page running while minimised (during a session)
   };
-  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap", "keepAlive", "alarmSound"];
+  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap", "keepAlive", "alarmSound", "notifySound"];
   const LIMITS = {
     wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
     nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
@@ -1976,27 +1976,45 @@
     if (!kind || !s.notify || !s[kind.key]) return;
     if (!always && !s.notifyAlways && !(document.hidden || !document.hasFocus())) return;
     showNotification(kind.title, message, `nt-autotyper-${type}`, kind.priority);
+    if (kind.priority >= 3 && kind.priority < 5 && s.notifySound) alarm.chime();
   }
 
-  function showNotification(title, body, tag, priority = 2) {
-    if (!("Notification" in window) || Notification.permission !== "granted") return false;
+  // Notifications are kept referenced until Chrome reports on them, so none
+  // gets cleaned up before it's shown. Only the options a priority needs are
+  // set: plain ones are as plain as possible (some setups mishandle extras).
+  const liveNotifications = new Set();
+  function showNotification(title, body, tag, priority = 2, onResult) {
+    if (!("Notification" in window) || Notification.permission !== "granted") {
+      onResult?.("not allowed");
+      return false;
+    }
     try {
-      const n = new Notification(title, {
-        body,
-        tag,
-        icon: "/favicon.ico",
-        silent: priority <= 1, // races: no sound
-        requireInteraction: priority >= 4, // session done, captcha: stay until dismissed
-        renotify: priority >= 5, // captcha: alert again even with the same tag
-      });
+      const options = { body, tag };
+      if (priority <= 1) options.silent = true; // races: no sound
+      if (priority >= 4) options.requireInteraction = true; // session done, captcha: stay until dismissed
+      if (priority >= 5) options.renotify = true; // captcha: alert again even with the same tag
+      const n = new Notification(title, options);
+      liveNotifications.add(n);
+      const done = (result) => {
+        onResult?.(result);
+        onResult = null;
+      };
+      n.onshow = () => done("shown");
+      n.onerror = () => {
+        liveNotifications.delete(n);
+        done("error");
+      };
+      n.onclose = () => liveNotifications.delete(n);
       // Clicking a notification brings you to the race tab.
       n.onclick = () => {
         window.focus();
         n.close();
       };
+      timers.set(() => liveNotifications.delete(n), 10 * 60000);
       return true;
-    } catch {
+    } catch (err) {
       /* some browsers only allow notifications from a service worker */
+      onResult?.(`error: ${err.message}`);
       return false;
     }
   }
@@ -2020,6 +2038,29 @@
         this.audio.resume?.();
       } catch {
         this.audio = null;
+      }
+    },
+    // A soft two-note chime for milestones and session done.
+    chime() {
+      if (!this.audio) return;
+      try {
+        const ctx = this.audio;
+        const t0 = ctx.currentTime + 0.02;
+        [660, 990].forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.0001, t0 + i * 0.18);
+          gain.gain.exponentialRampToValueAtTime(0.12, t0 + i * 0.18 + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.18 + 0.5);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(t0 + i * 0.18);
+          osc.stop(t0 + i * 0.18 + 0.55);
+        });
+        this.chimes = (this.chimes ?? 0) + 1;
+      } catch {
+        /* no sound */
       }
     },
     beep() {
@@ -2578,6 +2619,7 @@
               <label class="check"><input type="checkbox" data-k="notifySeason"><span>Season pass rewards <i class="prio p2">normal</i></span></label>
               <label class="check"><input type="checkbox" data-k="notifyRace"><span>After each race <i class="prio p1">low</i><small>Silent. Place, WPM, accuracy, money, XP</small></span></label>
               <label class="check"><input type="checkbox" data-k="alarmSound"><span>Alarm sound for captchas</span></label>
+              <label class="check"><input type="checkbox" data-k="notifySound"><span>Chime for milestones and session done<small>You hear it even if your computer hides the pop-up.</small></span></label>
               <label class="check"><input type="checkbox" data-k="notifyAlways"><span>Also when I'm looking at the tab</span></label>
             </div>
             <div class="notify-test"><button class="btn2 test-notify">Send a test notification</button><button class="btn2 test-alarm">Test the captcha alert</button><small class="notify-status"></small></div>
@@ -2816,13 +2858,37 @@
       }
       $(".test-alarm").blur();
     });
+    // Where to look when Chrome showed it but nothing appeared.
+    function systemHelp() {
+      const ua = navigator.userAgent;
+      if (/Windows/.test(ua)) {
+        return "Windows is hiding it: Settings → System → Notifications → turn on notifications AND your browser (Google Chrome / Edge) in the app list; turn off Do not disturb, and check the automatic Do-not-disturb rules (they switch on in full screen, e.g. the focus view's full-screen button, and while gaming). Also look in the notification centre (Win+N).";
+      }
+      if (/Mac/.test(ua)) {
+        return "macOS is hiding it: System Settings → Notifications → Google Chrome → Allow notifications, alert style Banners or Alerts; and turn off Focus / Do Not Disturb (Control Centre).";
+      }
+      return "Your system is hiding it: check its notification settings for your browser, and Do Not Disturb.";
+    }
     $(".test-notify").addEventListener("click", async () => {
       if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission().catch(() => {});
-      const ok = showNotification("NT Autotyper", "Test: notifications are working.", "nt-autotyper-test");
+      alarm.unlock();
+      const status = $(".notify-status");
       showNotifyStatus();
-      $(".notify-status").textContent += ok
-        ? " Sent! Nothing popped up? Check your system's notification settings for your browser, and Do Not Disturb / Focus."
-        : "";
+      status.textContent += " Sending…";
+      const result = await new Promise((resolve) => {
+        showNotification("NT Autotyper", "Test: notifications are working.", `nt-autotyper-test-${Date.now()}`, 2, resolve);
+        timers.set(() => resolve("no reply"), 4000);
+      });
+      alarm.chime();
+      status.textContent =
+        result === "shown"
+          ? `Chrome says it showed the notification (and you should have heard a chime). Didn't see it? ${systemHelp()}`
+          : result === "not allowed"
+            ? "Notifications aren't allowed for nitrotype.com: click the padlock in the address bar → Notifications → Allow."
+            : result.startsWith("error")
+              ? `Chrome couldn't show it (${result}). Open chrome://settings/content/notifications and make sure nitrotype.com is under "Allowed", and that "Sites can ask to send notifications" is on.`
+              : `Chrome didn't confirm it showed the notification. Try once more. If it still says this: ${systemHelp()}`;
+      status.dataset.result = result;
       $(".test-notify").blur();
     });
     function fillLabels() {
