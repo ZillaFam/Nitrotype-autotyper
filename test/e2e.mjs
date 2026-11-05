@@ -275,7 +275,7 @@ try {
     check(`${name}: typing stops`, (await typed()) === t1, `${t1} letters`);
     check(`${name}: session stopped with a message`, (await status(page)) === "Captcha: solve it yourself, then press Start" && (await page.locator(".go").textContent()) === "Start", await status(page));
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: notification (even with the tab in view)`, notes.length === 1 && notes[0].startsWith("⚠ CAPTCHA: session stopped: "), JSON.stringify(notes));
+    check(`${name}: notification (even with the tab in view)`, notes.length === 1 && notes[0].startsWith("⚠ CAPTCHA: session stopped · racer_me: "), JSON.stringify(notes));
     check(`${name}: never clicks the captcha`, (await page.evaluate(() => window.__captchaClicks)) === 0);
     const opts = (await page.evaluate(() => window.__noteOpts))[0];
     check(`${name}: urgent: stays on screen and re-alerts`, opts.requireInteraction === true && opts.renotify === true && !opts.silent, JSON.stringify(opts));
@@ -346,11 +346,11 @@ try {
     const opts = await page.evaluate(() => window.__noteOpts);
     const sounds = (await page.evaluate(() => window.__sounds)).join(" ");
     const byTitle = (t) => opts.find((o) => o.title === t);
-    check(`${name}: race at Low: a chime, no pop-up`, !byTitle("Race finished") && sounds.startsWith("chime chime"), sounds);
-    check(`${name}: level up at Normal: a pop-up, no sound`, Boolean(byTitle("Level up!")) && /chime chime pop:Level up!/.test(sounds) && !/(chime|beep) pop:Level up!/.test(sounds.replace(/^chime chime /, "")), sounds);
+    check(`${name}: race at Low: a chime, no pop-up`, !byTitle("Race finished · racer_me") && sounds.startsWith("chime chime"), sounds);
+    check(`${name}: level up at Normal: a pop-up, no sound`, Boolean(byTitle("Level up! · racer_me")) && /chime chime pop:Level up!/.test(sounds) && !/(chime|beep) pop:Level up!/.test(sounds.replace(/^chime chime /, "")), sounds);
     check(`${name}: season pass at Off: nothing`, !notes.some((n) => n.startsWith("Season pass")));
-    check(`${name}: milestone at High: chime + pop-up`, /chime chime pop:★ Milestone/.test(sounds) && !byTitle("★ Milestone").requireInteraction, sounds);
-    const session = byTitle("NT Autotyper session");
+    check(`${name}: milestone at High: chime + pop-up`, /chime chime pop:★ Milestone/.test(sounds) && !byTitle("★ Milestone · racer_me").requireInteraction, sounds);
+    const session = byTitle("NT Autotyper session · racer_me");
     check(`${name}: session done at Urgent: alarm + pop-up that stays`, /beep beep beep pop:NT Autotyper session/.test(sounds) && session?.requireInteraction === true && session?.renotify === true, JSON.stringify(session));
     await context.close();
   });
@@ -406,8 +406,9 @@ try {
     await page.locator(".go").click();
     await waitForResults(page, 2, 90000);
     await page.waitForTimeout(3000);
-    const opts = (await page.evaluate(() => window.__noteOpts)).filter((o) => o.title === "Race finished");
+    const opts = (await page.evaluate(() => window.__noteOpts)).filter((o) => o.title === "Race finished · racer_me");
     check(`${name}: a pop-up for each race, with the tab in view`, opts.length === 2, JSON.stringify(opts.map((o) => o.body)));
+    check(`${name}: your username in the title`, opts.length === 2 && opts.every((o) => o.title === "Race finished · racer_me"), JSON.stringify(opts.map((o) => o.title)));
     check(`${name}: a fresh tag each time (so none is silently replaced)`, opts.length === 2 && opts[0].tag !== opts[1].tag, JSON.stringify(opts.map((o) => o.tag)));
     const toasts = await page.locator(".toast").allTextContents();
     check(`${name}: also a pop-up on the page itself`, toasts.some((t) => t.startsWith("Race finished")), toasts.join(" | "));
@@ -537,20 +538,20 @@ try {
     const rs = await waitForResults(page, 2, 60000);
     await page.waitForTimeout(5000);
     const notes = await page.evaluate(() => window.__notes);
-    const raceNotes = notes.filter((n) => n.startsWith("Race finished: "));
+    const raceNotes = notes.filter((n) => n.startsWith("Race finished · racer_me: "));
     const want = rs[0].shown;
     const suffix = ["st", "nd", "rd"][want.place - 1] ?? "th";
     check(
       `${name}: race note with place, WPM, accuracy, money, XP`,
-      raceNotes.length === 2 && raceNotes[0] === `Race finished: ${want.place}${suffix} · ${want.wpm} WPM · ${want.accuracy.toFixed(1)}% · +$${want.money.toLocaleString()} · +${want.xp} XP`,
+      raceNotes.length === 2 && raceNotes[0] === `Race finished · racer_me: ${want.place}${suffix} · ${want.wpm} WPM · ${want.accuracy.toFixed(1)}% · +$${want.money.toLocaleString()} · +${want.xp} XP`,
       JSON.stringify(raceNotes),
     );
-    check(`${name}: level up`, notes.includes(`Level up!: You reached level ${rs[0].shown_level}!`) && notes.includes(`Level up!: You reached level ${rs[1].shown_level}!`), JSON.stringify(notes));
-    check(`${name}: season pass`, notes.includes(`Season pass: Season pass tier ${rs[0].shown_season} unlocked`), JSON.stringify(notes));
-    check(`${name}: personal best`, notes.some((n) => /^★ Milestone: New personal best: \d+ WPM!$/.test(n)), JSON.stringify(notes));
+    check(`${name}: level up`, notes.includes(`Level up! · racer_me: You reached level ${rs[0].shown_level}!`) && notes.includes(`Level up! · racer_me: You reached level ${rs[1].shown_level}!`), JSON.stringify(notes));
+    check(`${name}: season pass`, notes.includes(`Season pass · racer_me: Season pass tier ${rs[0].shown_season} unlocked`), JSON.stringify(notes));
+    check(`${name}: personal best`, notes.some((n) => /^★ Milestone · racer_me: New personal best: \d+ WPM!$/.test(n)), JSON.stringify(notes));
     const summary = notes[notes.length - 1];
     const money = rs.reduce((a, r) => a + r.shown.money, 0);
-    check(`${name}: session summary last, with totals`, summary.startsWith("NT Autotyper session: 2 races · avg ") && summary.includes(`+$${money.toLocaleString()}`) && summary.includes("XP"), summary);
+    check(`${name}: session summary last, with totals`, summary.startsWith("NT Autotyper session · racer_me: 2 races · avg ") && summary.includes(`+$${money.toLocaleString()}`) && summary.includes("XP"), summary);
     await context.close();
   });
 
@@ -633,7 +634,7 @@ try {
     await page.waitForTimeout(2500);
     check(`${name}: says so`, (await status(page)) === "Disqualified. Next race soon…", await status(page));
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: notification`, notes.includes("⚠ NT Autotyper: Disqualified for inactivity. Going on to the next race."), JSON.stringify(notes));
+    check(`${name}: notification`, notes.includes("⚠ NT Autotyper · racer_me: Disqualified for inactivity. Going on to the next race."), JSON.stringify(notes));
     const [r] = await waitForResults(page, 1, 60000);
     check(`${name}: pressed Race Again (not the garage) and raced`, r.correct > 100 && (await page.evaluate(() => window.__garageClicks)) === 0);
     await page.waitForTimeout(1500);
@@ -874,7 +875,7 @@ try {
     const notes = await page.evaluate(() => window.__notes);
     check(
       `${name}: a note per race, then the session summary`,
-      notes.filter((n) => n.startsWith("Race finished: ")).length === 2 && /^NT Autotyper session: 2 races · avg \d+ WPM/.test(notes[notes.length - 1]),
+      notes.filter((n) => n.startsWith("Race finished · racer_me: ")).length === 2 && /^NT Autotyper session · racer_me: 2 races · avg \d+ WPM/.test(notes[notes.length - 1]),
       JSON.stringify(notes),
     );
     await context.close();

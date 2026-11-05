@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.10.0
+// @version      3.10.1
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.10.0";
+  const VERSION = "3.10.1";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -725,6 +725,14 @@
     }
   }
 
+  /** Your Nitro Type username (display name if there's no username). */
+  function myUsername() {
+    const user = raceComponent()?.props?.user;
+    const saved = readSavedUser();
+    const name = user?.username || saved?.username || user?.displayName || saved?.displayName || "";
+    return String(name).slice(0, 40);
+  }
+
   /** Your updated totals for the race you just finished, if Nitro Type sent them. */
   function finishedTotals() {
     const comp = raceComponent();
@@ -1100,6 +1108,8 @@
       this.progressBefore = readProgress(); // level / season tier, to spot a level up
       listenToServer();
       serverRewards = null;
+      const player = myUsername();
+      if (player) toTop({ kind: "player", name: player });
       this.totalsBefore = savedTotals(); // money / XP / level before the race
       focusRace();
 
@@ -1639,7 +1649,7 @@
   };
   // Settings that come as a min/max pair.
   const PAIRS = { wpmMin: "wpmMax", accMin: "accMax", breakLenMin: "breakLenMax" };
-  const KEYS = { settings: "nt-autotyper-settings", stats: "nt-autotyper-stats", ui: "nt-autotyper-ui", session: "nt-autotyper-session" };
+  const KEYS = { settings: "nt-autotyper-settings", stats: "nt-autotyper-stats", ui: "nt-autotyper-ui", session: "nt-autotyper-session", player: "nt-autotyper-player" };
 
   function readJSON(storage, key, fallback) {
     try {
@@ -1715,7 +1725,9 @@
       panel.render();
       updateTitle();
     },
+    player: "", // your Nitro Type username, shown in notification titles
     init() {
+      this.player = readJSON(localStorage, KEYS.player, "") || "";
       if (LOADED_LATE) {
         this.message = 'Loaded late, so it may not type. In Tampermonkey settings set Content Script API to "UserScripts API Dynamic", then reload.';
       }
@@ -1993,7 +2005,9 @@
     if (!kind || !s.notify) return;
     const level = s[kind.level];
     if (level === "off") return;
-    deliver(level, kind.title, message, `nt-autotyper-${type}`);
+    // "Race finished · yourname"
+    const title = session.player ? `${kind.title} · ${session.player}` : kind.title;
+    deliver(level, title, message, `nt-autotyper-${type}`);
   }
 
   /**
@@ -2244,6 +2258,12 @@
         break;
       case "raceFailed":
         session.raceFailed(msg.message);
+        break;
+      case "player":
+        if (msg.name && msg.name !== session.player) {
+          session.player = String(msg.name).slice(0, 40);
+          writeJSON(localStorage, KEYS.player, session.player);
+        }
         break;
       case "captcha":
         session.captcha();

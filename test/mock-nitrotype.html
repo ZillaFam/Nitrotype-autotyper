@@ -99,7 +99,7 @@
           { userID: 102, name: "Cruiser", wpm: 105 },
           { userID: 103, name: "Slowpoke", wpm: 55 },
         ];
-        const comp = { state: { racers: [], lessonContent: "" }, props: { user: { userID: ME, loggedIn: params.get("loggedout") !== "1", level: 11, seasonLevel: 4 } } };
+        const comp = { state: { racers: [], lessonContent: "" }, props: { user: { userID: ME, username: "racer_me", displayName: "Me Myself", loggedIn: params.get("loggedout") !== "1", level: 11, seasonLevel: 4 } } };
         window.__garageClicks = 0;
         // The always-on reCAPTCHA v3 badge: not a captcha to solve.
         document.write(`<iframe class="grecaptcha-badge" src="about:blank#https://www.google.com/recaptcha/api2/anchor?k=x&size=invisible" width="256" height="60" style="position:fixed;right:0;bottom:0;border:0"></iframe>`);
