@@ -19,7 +19,9 @@
     inrace=1                                   first load shows the "Currently in a Race" popup; Try Again starts the race
     results=plain                              a plain results box instead of Nitro Type's results table
     state=none                                 no React fiber on #raceContainer (script must read the results screen)
-    captcha=1                                  a captcha appears mid-race (the race freezes); clicks on it are counted in window.__captchaClicks
+    captcha=1                                  a captcha appears mid-race, once (the race freezes); clicks on it are counted in window.__captchaClicks;
+                                               window.__solveCaptcha() is you solving it (it goes away, the race goes on)
+    status=none                                no "status" events (countdown / racing) from the race server
     levelup=1                                  each race levels you up (state + "Level Up!" on the results screen)
     season=1                                   each race unlocks a season pass tier
     dq=1 | dq=all                              the first race (or every race) ends in Nitro Type's "Disqualified!" popup
@@ -40,7 +42,8 @@
   Page loads are counted in sessionStorage "mock-loads" (window.__loads), and
   clicks on a decoy "New Race" link in window.__decoyClicks.
   Results go to sessionStorage "mock-results" (survives reloads) and
-  window.__results.
+  window.__results. Each result has keys: [{ ch, ok, t }] (every accepted
+  key, t in ms since GO) and firstKeyMs (GO to the first right key).
 -->
 <html lang="en">
   <head>
@@ -153,7 +156,8 @@
           flag.textContent = "🏁";
           copy.appendChild(flag);
           spans[0].classList.add("is-waiting");
-          race = { text, spans, pos: 0, started: false, startedAt: 0, correct: 0, wrong: 0, nitroWords: [] };
+          race = { text, spans, pos: 0, started: false, startedAt: 0, correct: 0, wrong: 0, nitroWords: [], keys: [] };
+          if (params.get("status") !== "none") emit("status", { status: "countdown" });
           const r = race;
           const fresh = () => ({ typed: 0, skipped: 0, errors: 0, startStamp: 0, completeStamp: 0 });
           comp.state.lessonContent = text;
@@ -166,6 +170,7 @@
           setTimeout(() => {
             r.started = true;
             r.startedAt = performance.now();
+            if (params.get("status") !== "none") emit("status", { status: "racing" });
             for (const x of comp.state.racers) x.progress.startStamp = Date.now();
             // Bots move along at their own speed and finish in order.
             botTimer = setInterval(() => {
@@ -206,7 +211,8 @@
               setTimeout(newRace, 300);
             });
           }
-          if (params.get("captcha") === "1" && !r.captcha && pos >= 50) {
+          if (params.get("captcha") === "1" && !window.__captchaDone && pos >= 50) {
+            window.__captchaDone = true; // once per page
             // A captcha takes over: the race freezes until it's solved.
             r.captcha = true;
             r.dead = true;
@@ -217,6 +223,11 @@
             );
             const box = document.querySelector(".captcha-modal");
             for (const t of ["pointerdown", "mousedown", "click"]) box.addEventListener(t, () => window.__captchaClicks++, true);
+            // You, solving it: it goes away and the race carries on.
+            window.__solveCaptcha = () => {
+              box.remove();
+              r.dead = false;
+            };
           }
           for (let i = r.pos; i < pos; i++) r.spans[i].className = "dash-letter is-correct is-typed";
           r.pos = pos;
@@ -240,8 +251,10 @@
           if (!isTrusted) return void untrusted++;
           if (!r.started) return void earlyKeys++;
           if (r.pos >= r.text.length || r.dead || r.spans[r.pos]?.isConnected === false) return;
+          r.keys.push({ ch, ok: ch === r.text[r.pos], t: Math.round(performance.now() - r.startedAt) });
           if (ch === r.text[r.pos]) {
             r.correct++;
+            if (r.firstKeyMs === undefined) r.firstKeyMs = Math.round(performance.now() - r.startedAt);
             moveTo(r.pos + 1);
           } else {
             r.wrong++;
@@ -275,6 +288,9 @@
             untrusted,
             earlyKeys,
             nitroWords: r.nitroWords,
+            firstKeyMs: r.firstKeyMs,
+            keys: r.keys,
+            text: r.text,
           };
           window.__results.push(result);
           sessionStorage.setItem("mock-results", JSON.stringify(window.__results));

@@ -93,9 +93,71 @@ try {
     await page.locator(".go").click();
     const [r] = await waitForResults(page, 1);
     checkRace(name, r, { wpm: 120, accuracy: 100, accTol: 0 });
-    check(`${name}: waited for GO`, r.earlyKeys > 0, `${r.earlyKeys} probe keys before GO`);
     await page.waitForTimeout(800);
     check(`${name}: session ends after 1 race`, (await status(page)) === "Done: 1 race", await status(page));
+    await context.close();
+  });
+
+  await test("GO without race status events", async (name) => {
+    const { context, page } = await open("?status=none", { ...BASE, wpmMin: 120, wpmMax: 120 });
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    checkRace(name, r, { wpm: 120, accuracy: 100, accTol: 0 });
+    check(`${name}: keeps trying the first key until GO`, r.earlyKeys > 0, `${r.earlyKeys} keys before GO`);
+    await context.close();
+  });
+
+  // The rhythm of a person: slower on capitals and after sentences, with the
+  // overall speed still on target.
+  await test("human rhythm", async (name) => {
+    const { context, page } = await open("?countdown=300", { ...BASE, wpmMin: 90, wpmMax: 90, variance: 10, races: 2, humanLevel: "natural" });
+    await page.locator(".go").click();
+    const results = await waitForResults(page, 2, 90000);
+    const caps = [];
+    const lower = [];
+    const sentence = [];
+    const spaces = [];
+    const sameHand = [];
+    const altHand = [];
+    const LEFT = new Set("qwertasdfgzxcvb");
+    for (const r of results) {
+      checkRace(`${name} (race)`, r, { wpm: 90, accuracy: 100, accTol: 0 });
+      const ok = r.keys.filter((k) => k.ok);
+      for (let i = 1; i < ok.length; i++) {
+        const gap = ok[i].t - ok[i - 1].t;
+        const ch = r.text[i];
+        const prev = r.text[i - 1];
+        if (ch === " ") (/[.!?]/.test(prev) ? sentence : spaces).push(gap);
+        else if (/[A-Z]/.test(ch)) caps.push(gap);
+        else if (/[a-z]/.test(ch)) {
+          lower.push(gap);
+          if (/[a-z]/.test(prev) && prev !== ch) (LEFT.has(prev) === LEFT.has(ch) ? sameHand : altHand).push(gap);
+        }
+      }
+    }
+    // The first race may start before the script hears the countdown; the second can't.
+    check(`${name}: no keys before GO`, results[1].earlyKeys === 0, `${results[1].earlyKeys} keys before GO`);
+    check(`${name}: first key a human reaction time after GO`, results[1].firstKeyMs >= 180 && results[1].firstKeyMs <= 900, `${results[1].firstKeyMs} ms`);
+    const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+    check(`${name}: capitals slower than lowercase`, avg(caps) > 1.15 * avg(lower), `${avg(caps).toFixed(0)} vs ${avg(lower).toFixed(0)} ms`);
+    check(`${name}: a beat after a sentence`, avg(sentence) > 1.6 * avg(spaces), `${avg(sentence).toFixed(0)} vs ${avg(spaces).toFixed(0)} ms`);
+    check(`${name}: alternating hands faster than one hand`, avg(altHand) < avg(sameHand), `${avg(altHand).toFixed(0)} vs ${avg(sameHand).toFixed(0)} ms`);
+    const gaps = results[0].keys.filter((k) => k.ok).map((k, i, a) => (i ? k.t - a[i - 1].t : 0)).slice(1);
+    const spread = Math.sqrt(avg(gaps.map((g) => (g - avg(gaps)) ** 2))) / avg(gaps);
+    check(`${name}: uneven like a person (not a metronome)`, spread > 0.3, `spread ${spread.toFixed(2)}`);
+    await context.close();
+  });
+
+  await test("human touch setting", async (name) => {
+    const { context, page } = await open("", { ...BASE }, { advanced: false });
+    check(`${name}: shown in simple mode, Natural by default`, (await page.locator(".seg button.on").textContent()) === "Natural");
+    await page.locator('.seg [data-human="strong"]').click();
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-settings")).humanLevel);
+    check(`${name}: picking Strong saves it`, saved === "strong" && (await page.locator(".seg button.on").textContent()) === "Strong", saved);
+    check(`${name}: explains it`, (await page.locator(".human-hint").textContent()).startsWith("Very human"));
+    check(`${name}: settings grouped`, (await page.locator(".g-head").allTextContents()).join(",") === "Speed & accuracy,Human touch,Session");
+    check(`${name}: status badge says Idle`, (await page.locator(".badge").textContent()) === "Idle");
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-simple-groups.png") });
     await context.close();
   });
 
@@ -234,7 +296,7 @@ try {
     await context.close();
   });
 
-  await test("captcha: stops and notifies, never touches it", async (name) => {
+  await test("captcha: pauses, carries on once solved, never touches it", async (name) => {
     const { context, page } = await open("?captcha=1&countdown=500", { ...BASE, wpmMin: 150, wpmMax: 150, races: 3, notify: true }, null, () => {
       window.__notes = [];
       window.Notification = class {
@@ -273,9 +335,14 @@ try {
     const t1 = await typed();
     await page.waitForTimeout(1500);
     check(`${name}: typing stops`, (await typed()) === t1, `${t1} letters`);
-    check(`${name}: session stopped with a message`, (await status(page)) === "Captcha: solve it yourself, then press Start" && (await page.locator(".go").textContent()) === "Start", await status(page));
+    check(
+      `${name}: session paused (not stopped) with a message`,
+      (await status(page)) === "Paused: solve the captcha and I'll carry on by myself" && (await page.locator(".go").textContent()) === "Stop",
+      `${await status(page)} / ${await page.locator(".go").textContent()}`,
+    );
+    check(`${name}: badge says Captcha`, (await page.locator(".badge").textContent()) === "Captcha");
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: notification (even with the tab in view)`, notes.length === 1 && notes[0].startsWith("⚠ CAPTCHA: session stopped · racer_me: "), JSON.stringify(notes));
+    check(`${name}: notification (even with the tab in view)`, notes.length === 1 && notes[0].startsWith("⚠ CAPTCHA: session paused · racer_me: "), JSON.stringify(notes));
     check(`${name}: never clicks the captcha`, (await page.evaluate(() => window.__captchaClicks)) === 0);
     const opts = (await page.evaluate(() => window.__noteOpts))[0];
     check(`${name}: urgent: stays on screen and re-alerts`, opts.requireInteraction === true && opts.renotify === true && !opts.silent, JSON.stringify(opts));
@@ -288,12 +355,35 @@ try {
     }
     check(`${name}: tab title flashes`, titles.has("⚠ CAPTCHA") && titles.has("■ Captcha"), [...titles].join(" / "));
     if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "captcha-alarm.png") });
-    // You solve the captcha, then press Start.
-    await page.evaluate(() => document.querySelector(".captcha-modal").remove());
-    await page.waitForTimeout(1600);
+    // Still there a while later: stays paused.
+    await page.waitForTimeout(4000);
+    check(`${name}: stays paused while the captcha is there`, (await typed()) === t1 && (await status(page)).startsWith("Paused"), await status(page));
+    // You solve the captcha. Nothing to press: it carries on by itself.
+    await page.evaluate(() => window.__solveCaptcha());
+    const solvedToast = await page
+      .waitForFunction(() => [...document.querySelectorAll("body > div")].some((d) => d.shadowRoot?.querySelector(".toast")?.textContent.startsWith("Captcha solved")), null, { timeout: 10000 })
+      .then(() => true, () => false);
+    check(`${name}: says it's carrying on`, solvedToast);
+    const toasts = await page.locator(".toast").allTextContents();
+    check(`${name}: the captcha pop-up goes away`, !toasts.some((t) => t.startsWith("⚠ CAPTCHA")), toasts.join(" | "));
+    const results = await waitForResults(page, 2, 60000);
+    check(`${name}: finishes that race, then the next, by itself`, results.length >= 2, `${results.length} races`);
+    check(`${name}: alarm over`, (await page.locator(".box.alarm").count()) === 0 && !(await page.title()).includes("CAPTCHA"), await page.title());
+    check(`${name}: never clicked the captcha`, (await page.evaluate(() => window.__captchaClicks)) === 0);
+    await context.close();
+  });
+
+  await test("captcha: Stop while paused", async (name) => {
+    const { context, page } = await open("?captcha=1&countdown=500", { ...BASE, wpmMin: 150, wpmMax: 150, races: 3 });
+    await page.locator(".go").click();
+    await page.waitForFunction(() => document.querySelector(".captcha-modal"), null, { timeout: 30000 });
+    await page.waitForTimeout(1500);
     await page.locator(".go").click();
     await page.waitForTimeout(500);
-    check(`${name}: pressing Start ends the alarm`, (await page.locator(".box.alarm").count()) === 0 && !(await page.title()).includes("CAPTCHA"), await page.title());
+    check(`${name}: stopped, alarm off`, (await page.locator(".go").textContent()) === "Start" && (await page.locator(".box.alarm").count()) === 0, await status(page));
+    await page.evaluate(() => window.__solveCaptcha());
+    await page.waitForTimeout(4000);
+    check(`${name}: doesn't carry on after a Stop`, (await page.evaluate(() => window.__results.length)) === 0 && (await page.locator(".go").textContent()) === "Start");
     await context.close();
   });
 
@@ -503,7 +593,7 @@ try {
     await page.locator(".test-alarm").click();
     await page.waitForTimeout(300);
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: sends the urgent test alert`, notes.length === 1 && notes[0] === "⚠ CAPTCHA: session stopped: TEST: this is what a captcha alert looks like.", JSON.stringify(notes));
+    check(`${name}: sends the urgent test alert`, notes.length === 1 && notes[0] === "⚠ CAPTCHA: session paused: TEST: this is what a captcha alert looks like.", JSON.stringify(notes));
     check(`${name}: panel turns red`, (await page.locator(".box.alarm").count()) === 1);
     await page.waitForTimeout(6500);
     check(`${name}: stops by itself`, (await page.locator(".box.alarm").count()) === 0);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.10.1
+// @version      3.11.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.10.1";
+  const VERSION = "3.11.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -395,17 +395,18 @@
   }
 
   /**
-   * The wrong key a person might hit instead of text[i]: the next letter
-   * too early (fingers out of order), the previous key again (double tap),
-   * or most often a neighbouring key.
+   * The wrong key a person might hit instead of text[i]: Shift forgotten on
+   * a capital, the next letter too early (fingers out of order), the
+   * previous key again (double tap), or most often a neighbouring key.
    */
   function makeTypo(text, i) {
     const ch = text[i];
     const prev = text[i - 1];
     const next = text[i + 1];
     const r = Math.random();
-    if (r < 0.25 && next && next !== " " && next !== ch) return next;
-    if (r < 0.4 && prev && prev !== " " && prev !== ch) return prev;
+    if (ch !== ch.toLowerCase() && r < 0.3) return ch.toLowerCase();
+    if (r < 0.5 && next && next !== " " && next !== ch) return next;
+    if (r < 0.6 && prev && prev !== " " && prev !== ch) return prev;
     return neighbourTypo(ch);
   }
 
@@ -709,12 +710,24 @@
   // Race updates from Nitro Type's server, as they arrive (read-only listener).
   const heardServers = new WeakSet();
   let serverRewards = null;
+  // Nitro Type's race status: "countdown", then "racing" at GO. Lets the
+  // first key come a human reaction time after GO, instead of instantly.
+  const raceSignal = { seen: false, goAt: 0 };
   function listenToServer() {
     const comp = raceComponent();
     const server = comp?.server;
     if (!server || typeof server.on !== "function" || heardServers.has(server)) return;
     heardServers.add(server);
     try {
+      server.on("status", (e) => {
+        if (e?.status === "countdown") {
+          raceSignal.seen = true;
+          raceSignal.goAt = 0;
+        } else if (e?.status === "racing") {
+          raceSignal.seen = true;
+          raceSignal.goAt = performance.now();
+        }
+      });
       server.on("update", (e) => {
         const myId = comp.props?.user?.userID;
         const me = e?.racers?.find?.((r) => r?.userID === myId);
@@ -887,27 +900,93 @@
   const COMMON_BIGRAMS = new Set(
     "th he in er an re on at en nd ti es or te of ed is it al ar st to nt ng se ha as ou io le ve co me de hi ri ro ic ne ea ra ce li ch ll be ma si om ur".split(" "),
   );
+  // Words people type without thinking: their letters come faster.
+  const COMMON_WORDS = new Set(
+    ("the be to of and a in that have i it for not on with he as you do at this but his by from they we say her she or an " +
+      "will my one all would there their what so up out if about who get which go me when make can like time no just him " +
+      "know take people into year your good some could them see other than then now look only come its over think also " +
+      "back after use two how our work first well way even new want because any these give day most us is are was were " +
+      "has had been did said very more much many such where why here").split(" "),
+  );
+
+  // Which finger types each key (touch typing), for hand/finger effects.
+  // Fingers 0-4 are the left hand (pinky..index), 5-9 the right (index..pinky).
+  const FINGER_COLUMNS = [
+    [0, 0, 1, 2, 3, 3, 5, 5, 6, 7, 8, 8, 8],
+    [0, 1, 2, 3, 3, 5, 5, 6, 7, 8, 8, 8, 8],
+    [0, 1, 2, 3, 3, 5, 5, 6, 7, 8, 8],
+    [0, 1, 2, 3, 3, 5, 5, 6, 7, 8],
+  ];
+  const KEY_FINGER = new Map();
+  ROWS.forEach((row, r) => [...row].forEach((ch, c) => KEY_FINGER.set(ch, { finger: FINGER_COLUMNS[r][c], hand: FINGER_COLUMNS[r][c] < 5 ? "L" : "R", row: r })));
+  const fingerOf = (ch) => (ch === " " ? null : KEY_FINGER.get(baseKey(ch)) ?? null);
+
+  // How strong the human touch is (setting "humanLevel").
+  const HUMAN = {
+    light: { shape: 0.6, drift: 0.03, pause: 0.5, cluster: 1.25, react: [170, 360] },
+    natural: { shape: 1, drift: 0.06, pause: 1, cluster: 1.6, react: [220, 520] },
+    strong: { shape: 1.35, drift: 0.1, pause: 1.6, cluster: 2, react: [260, 650] },
+  };
+  const humanProfile = (s) => HUMAN[s?.humanLevel] ?? HUMAN.natural;
+
+  /** The word that letter i belongs to (lowercase, without punctuation). */
+  function wordAt(text, i) {
+    let a = i;
+    let b = i;
+    while (a > 0 && text[a - 1] !== " ") a--;
+    while (b < text.length && text[b] !== " ") b++;
+    return { start: a, word: text.slice(a, b).toLowerCase().replace(/[^a-z']/g, "") };
+  }
 
   /** How long letter i takes relative to the average (before normalising). */
-  function rhythmFactor(text, i) {
+  function rhythmFactor(text, i, h) {
     const ch = text[i];
     const prev = text[i - 1] ?? " ";
     const progress = i / text.length;
     let f = 1;
-    if (ch === " ") f *= 0.85;
-    else if (prev === " ") f *= 1.2; // starting a new word
-    if (ch !== ch.toLowerCase()) f *= 1.45; // reach for Shift
-    else if (ch >= "0" && ch <= "9") f *= 1.5;
-    else if (/[^a-z ]/.test(ch)) f *= 1.35; // punctuation
-    if (prev === ch) f *= 0.8; // double letters roll
-    else if (COMMON_BIGRAMS.has((prev + ch).toLowerCase())) f *= 0.8;
+    if (ch === " ") {
+      f *= 0.82; // thumbs are quick
+      // A beat after a sentence, a shorter one after a comma.
+      if (/[.!?]/.test(prev)) f *= 1 + 1.4 * h.pause;
+      else if (/[,;:]/.test(prev)) f *= 1 + 0.6 * h.pause;
+    } else {
+      const { start, word } = wordAt(text, i);
+      if (i === start) {
+        f *= 1.18; // starting a new word
+        if (word.length >= 8) f *= 1 + 0.5 * h.pause; // a long word: a moment to read it
+      } else if (COMMON_WORDS.has(word)) {
+        f *= 0.85; // "the", "and"...: on autopilot
+      }
+      const a = fingerOf(prev);
+      const b = fingerOf(ch);
+      if (a && b) {
+        if (a.hand !== b.hand) f *= 0.86; // alternating hands: fast
+        else if (a.finger === b.finger && baseKey(prev) !== baseKey(ch)) f *= 1.3; // same finger, new key: slow
+        f *= 1 + 0.08 * Math.abs(a.row - b.row); // reaching across rows
+      }
+      if (prev === ch) f *= 0.85; // double letters roll
+      else if (COMMON_BIGRAMS.has((prev + ch).toLowerCase())) f *= 0.85;
+      if (ch !== ch.toLowerCase()) f *= 1.45; // reach for Shift
+      else if (ch >= "0" && ch <= "9") f *= 1.5;
+      else if (/[^a-z']/.test(ch)) f *= 1.35; // punctuation
+    }
     if (progress < 0.05) f *= 1.4 - (progress / 0.05) * 0.4; // warming up
-    else if (progress > 0.9) f *= 0.9; // final push
+    else if (progress > 0.9) f *= 0.92; // final push
     return f;
   }
 
-  function rhythmFor(text) {
-    const factors = [...text].map((_, i) => rhythmFactor(text, i));
+  /** Per-letter timing for a race: the rhythm, plus a slow drift in speed. */
+  function rhythmFor(text, h = HUMAN.natural) {
+    // Speed drifts up and down over the race (two slow waves, random phase).
+    const p1 = rand(0, 6.28);
+    const p2 = rand(0, 6.28);
+    const w1 = rand(0.8, 1.6);
+    const w2 = rand(2.2, 3.4);
+    const factors = [...text].map((_, i) => {
+      const x = i / text.length;
+      const drift = 1 + h.drift * (0.65 * Math.sin(6.28 * w1 * x + p1) + 0.35 * Math.sin(6.28 * w2 * x + p2));
+      return rhythmFactor(text, i, h) ** h.shape * drift;
+    });
     const mean = factors.reduce((a, b) => a + b, 0) / factors.length;
     return factors.map((f) => f / mean);
   }
@@ -924,6 +1003,7 @@
   const RETRY_MS = 250; // re-send a key Nitro Type didn't take after this long
   const NITRO_WAIT_MS = 350; // how long to wait for a nitro to kick in
   const STALL_MS = 5000;
+  const SHAKY_KEYS = 6; // after a typo: this many keys a little slower and more typo-prone
   const PACE_GAIN = 0.3;
 
   const sleep = (ms) => new Promise((r) => timers.set(r, Math.max(0, ms)));
@@ -934,9 +1014,10 @@
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * Math.random());
   }
 
-  // Typo chance per letter. Accuracy = right keys / all keys; spaces (about
-  // 1 key in 6) never get typos here, hence the 1.2.
-  const typoChance = (acc) => (acc >= 100 ? 0 : Math.min(0.5, (100 / acc - 1) * 1.2));
+  // Typo chance per key. Accuracy = right keys / all keys; a space (about
+  // 1 key in 6) gets a typo only 60% of the times it's picked (the next
+  // letter too early, or a double tap), hence the 1.07.
+  const typoChance = (acc) => (acc >= 100 ? 0 : Math.min(0.5, (100 / acc - 1) * 1.07));
 
   const engine = {
     settings: null,
@@ -977,6 +1058,16 @@
     },
 
     tick() {
+      listenToServer(); // early, so the countdown signal isn't missed
+      if (this.watchCaptcha && !this.armed) {
+        // Paused for a captcha: keep telling the session whether it's there.
+        const now = Date.now();
+        if (now - (this.captchaToldAt ?? 0) >= 1000) {
+          this.captchaToldAt = now;
+          toTop({ kind: "captchaState", showing: captchaShowing() });
+        }
+        return;
+      }
       if (!this.armed || this.running || !this.settings) return;
       if (captchaShowing()) return this.captchaStop();
       if (loggedOut()) return this.stopFor("loggedOut");
@@ -1041,7 +1132,8 @@
       this.dqReported = false;
     },
 
-    // A captcha showed up: stop typing at once and tell the session.
+    // A captcha showed up: stop typing at once and tell the session (which
+    // pauses until it's gone).
     captchaStop() {
       this.runId++;
       this.running = false;
@@ -1098,7 +1190,8 @@
       const target = Math.min(hi, Math.floor(rand(lo, hi + 1)));
       // Accuracy for this race, somewhere in the range (to 0.1%).
       const accTarget = Math.round(rand(Math.min(s.accMin, s.accMax), Math.max(s.accMin, s.accMax)) * 10) / 10;
-      const rhythm = rhythmFor(text);
+      const human = humanProfile(s);
+      const rhythm = rhythmFor(text, human);
       const nitroAt = nitroWordStarts(text, s.nitros);
       LOG("race text:", text);
       LOG("letter classes:", [...document.querySelectorAll(".dash-letter")].slice(0, 3).map((el) => el.className));
@@ -1113,9 +1206,13 @@
       this.totalsBefore = savedTotals(); // money / XP / level before the race
       focusRace();
 
-      // Wait for GO: keep trying the first key until Nitro Type takes it.
+      // Wait for GO. With Nitro Type's race status, the first key comes a
+      // human reaction time after GO; without it, keep trying the first key
+      // (at uneven intervals) until Nitro Type takes it.
       this.status("Waiting for the race to start…", { target });
       const waitStart = performance.now();
+      const reactMs = rand(human.react[0], human.react[1]);
+      let reacted = false;
       let race = startRace;
       let probeWall = Date.now();
       while (alive()) {
@@ -1137,8 +1234,18 @@
           return this.finishRun(id, "Can't read the race progress (Nitro Type changed its page?)");
         }
         if (performance.now() - waitStart > MAX_WAIT_MS) return this.finishRun(id, "Race didn't start");
+        const signalled = raceSignal.seen && performance.now() - waitStart < 20000;
+        if (signalled && !raceSignal.goAt) {
+          await sleep(25); // countdown: GO is coming
+          continue;
+        }
+        if (signalled && !reacted) {
+          reacted = true;
+          await sleep(reactMs - (performance.now() - raceSignal.goAt)); // a person's reaction to GO
+          continue;
+        }
         pressKey(text[0], rand(40, 90));
-        await sleep(PROBE_MS);
+        await sleep(signalled ? PROBE_MS : rand(140, 280));
       }
       if (!alive()) return;
       toTop({ kind: "raceStart" });
@@ -1157,6 +1264,7 @@
       let lastProgressAt = performance.now();
       let lastLoopWall = Date.now();
       let lastTypoPos = -1;
+      let shakyUntil = -1; // after a typo: a little slower, and more typo-prone
       let nextAt = performance.now();
 
       while (alive()) {
@@ -1230,15 +1338,25 @@
         }
 
         const { variance } = this.settings;
-        const pTypo = typoChance(accTarget);
+        const shaky = pos <= shakyUntil;
+        const baseTypo = typoChance(accTarget);
+        // Mistakes come in small clusters: for a few keys after one, another
+        // is likelier. Elsewhere a bit less likely, so accuracy stays on target.
+        const cluster = Math.max(1, Math.min(human.cluster, 0.7 / (SHAKY_KEYS * baseTypo)));
+        const pTypo = shaky
+          ? Math.min(0.5, baseTypo * cluster)
+          : cluster === 1
+            ? baseTypo
+            : (baseTypo * (1 - SHAKY_KEYS * cluster * baseTypo)) / (1 - SHAKY_KEYS * baseTypo);
         const perChar = 12000 / target; // 60 s / (wpm * 5 chars)
-        const interval = Math.max(5, (perChar - (pTypo * (REACTION_MS[0] + REACTION_MS[1])) / 2) / (1 + pTypo));
+        const interval = Math.max(5, (perChar - (baseTypo * (REACTION_MS[0] + REACTION_MS[1])) / 2) / (1 + baseTypo));
 
         // Sometimes hit the wrong key first, then (after a beat) the right one.
         if (lastTypoPos !== pos && Math.random() < pTypo) {
           lastTypoPos = pos;
           const typo = makeTypo(text, pos);
           if (typo) {
+            shakyUntil = pos + SHAKY_KEYS;
             pressKey(typo, rand(40, 100));
             wrong++;
             this.dbg.typos++;
@@ -1254,14 +1372,16 @@
         lastPressAt = now;
         lastPressPos = pos;
 
-        // Steer toward the target WPM from real progress (nitros excluded).
-        const typedSoFar = pos - skipped;
-        if (!pace) pace = { at: now, typed: typedSoFar };
-        const behindMs = now - pace.at - (typedSoFar - pace.typed) * perChar;
+        // Steer toward the target WPM, measured against the rhythm itself
+        // (slow and fast letters included), so only real drift gets
+        // corrected and the human rhythm survives. Nitro skips don't count.
+        if (!pace) pace = { at: now, expected: 0 };
+        else pace.expected += perChar * (rhythm[pos] ?? 1);
+        const behindMs = now - pace.at - pace.expected;
         const correction = Math.min(1.5 * interval, Math.max(-0.6 * interval, -behindMs * PACE_GAIN));
         const jitter = Math.min(2.5, Math.max(0.35, 1 + gaussian() * (variance / 100)));
-        let gap = interval * (rhythm[pos + 1] ?? 1) * jitter + correction;
-        if (text[pos] === " " && Math.random() < HESITATE_CHANCE) gap += rand(HESITATE_MS[0], HESITATE_MS[1]);
+        let gap = interval * (rhythm[pos + 1] ?? 1) * jitter * (shaky ? 1.15 : 1) + correction;
+        if (text[pos] === " " && Math.random() < HESITATE_CHANCE * human.pause) gap += rand(HESITATE_MS[0], HESITATE_MS[1]);
         nextAt = Math.max(nextAt, now - interval) + Math.max(2, gap);
       }
     },
@@ -1271,6 +1391,7 @@
       this.running = false;
       this.status(message, result ? { target: result.target, wpm: result.wpm, done: true } : {});
       if (result) {
+        raceSignal.goAt = 0; // the next race waits for its own GO
         this.lastRaceFinished = true;
         toTop({ kind: "raceDone", result });
         this.watchResults.start(result.at);
@@ -1606,7 +1727,15 @@
   function engineHandle(msg) {
     if (msg.settings) engine.settings = msg.settings;
     if (typeof msg.focus === "boolean") engine.focusOpen = msg.focus;
+    // Carrying on after a captcha: if the finished race is still on screen,
+    // ask for the next one (a race in progress just gets typed).
+    const resuming = engine.watchCaptcha && msg.watchCaptcha === false && msg.armed === true;
+    if (typeof msg.watchCaptcha === "boolean") engine.watchCaptcha = msg.watchCaptcha;
     if (typeof msg.armed === "boolean") engine.setArmed(msg.armed);
+    if (resuming) {
+      const race = readRace();
+      if (race && isDone(race)) toTop({ kind: "needNext" });
+    }
     setKeepAlive(Boolean(engine.armed && engine.settings?.keepAlive));
     if (msg.cmd === "next") engine.nextRace();
     if (msg.cmd === "leaveDq") engine.leaveDisqualified();
@@ -1630,6 +1759,7 @@
 
   const DEFAULTS = {
     wpmMin: 80, wpmMax: 95, accMin: 96, accMax: 98, variance: 25, nitros: 1, races: 5,
+    humanLevel: "natural", // how human the typing is: light, natural, strong
     breakEvery: 0, breakLenMin: 1, breakLenMax: 3, // long break every ~N races (0 = off), minutes
     notify: false, debug: false, notifyAlways: false, alarmSound: true, notifySound: true,
     // which notifications (all need "notify" on)
@@ -1673,7 +1803,7 @@
     season: { level: "levelSeason", old: "notifySeason", title: "Season pass" },
     milestone: { level: "levelMilestone", old: "notifyMilestone", title: "★ Milestone" },
     session: { level: "levelSession", old: "notifySession", title: "NT Autotyper session" },
-    captcha: { level: "levelCaptcha", old: "notifyCaptcha", title: "⚠ CAPTCHA: session stopped" },
+    captcha: { level: "levelCaptcha", old: "notifyCaptcha", title: "⚠ CAPTCHA: session paused" },
     // Disqualified, logged out, computer asleep, keys not accepted, ...
     problem: { level: "levelProblem", old: "notifySession", title: "⚠ NT Autotyper" },
   };
@@ -1695,6 +1825,7 @@
     for (const key of ["accMin", "accMax"]) s[key] = Math.round(s[key] * 2) / 2;
     for (const key of ["breakLenMin", "breakLenMax"]) s[key] = Math.round(s[key] * 10) / 10;
     for (const key of BOOLEAN_SETTINGS) s[key] = Boolean(s[key]);
+    if (!(s.humanLevel in HUMAN)) s.humanLevel = DEFAULTS.humanLevel;
     for (const kind of Object.values(NOTIFY)) {
       // A type switched off in an older version stays off.
       if (raw[kind.level] === undefined && raw[kind.old] === false) s[kind.level] = "off";
@@ -1732,6 +1863,8 @@
         this.message = 'Loaded late, so it may not type. In Tampermonkey settings set Content Script API to "UserScripts API Dynamic", then reload.';
       }
       this.state = { ...this.state, ...readJSON(sessionStorage, KEYS.session, {}) };
+      // Reloaded while paused for a captcha: keep waiting for it to go.
+      if (this.state.paused) this.captchaSeenAt = Date.now();
       this.stats = readJSON(localStorage, KEYS.stats, []);
       // Chrome restores a tab's session storage after a restart, a crash or
       // sleep. A session whose last heartbeat is old was interrupted: end it
@@ -1739,6 +1872,7 @@
       if (this.state.active && Date.now() - (this.state.beat ?? 0) > asleepLimit()) {
         this.state.active = false;
         this.state.breakUntil = 0;
+        this.state.paused = "";
         this.save();
         this.message = "Stopped: the browser was closed or the computer was off. Press Start to go again.";
         this.messageAt = Date.now();
@@ -1775,9 +1909,14 @@
     onBreak() {
       return this.state.active && Date.now() < this.state.breakUntil;
     },
+    paused() {
+      return this.state.active && Boolean(this.state.paused);
+    },
     sync() {
-      // Engines stay disarmed during a break, even if a race shows up.
-      toEngines({ settings: loadSettings(), armed: this.state.active && !this.onBreak() });
+      // Engines stay disarmed during a break or a captcha pause, even if a
+      // race shows up. While paused, they watch for the captcha to go.
+      const paused = this.paused();
+      toEngines({ settings: loadSettings(), armed: this.state.active && !this.onBreak() && !paused, watchCaptcha: paused });
     },
     pickBreakAfter(s) {
       if (!s.breakEvery) return 0;
@@ -1789,7 +1928,7 @@
       alarm.stop();
       alarm.unlock(); // Start is a click: the browser lets the alarm sound later
       this.dqInARow = 0;
-      this.state = { active: true, total: s.races, done: 0, sinceBreak: 0, breakAfter: this.pickBreakAfter(s), breakUntil: 0, startAt: Date.now(), beat: Date.now() };
+      this.state = { active: true, total: s.races, done: 0, sinceBreak: 0, breakAfter: this.pickBreakAfter(s), breakUntil: 0, paused: "", startAt: Date.now(), beat: Date.now() };
       this.save();
       this.sync();
       this.say("Waiting for a race…");
@@ -1798,10 +1937,13 @@
       timers.clear(this.fallbackTimer);
       timers.clear(this.nextTimer);
       const wasActive = this.state.active;
+      const wasPaused = this.paused();
       this.state.active = false;
       this.state.breakUntil = 0;
+      this.state.paused = "";
       this.save();
       this.sync();
+      if (wasPaused) alarm.stop();
       // Leave a mark in the tab title (and maybe a notification) if you
       // weren't watching.
       if (document.hidden) titleFlash = message.startsWith("Done") ? `✓ ${message}` : `■ ${message}`;
@@ -1867,10 +2009,47 @@
       if (this.summaryTimer && race === this.stats[this.stats.length - 1]) this.sendSummary();
     },
     raceNoteTimers: new Map(),
+    // A captcha: pause (not stop). Once you've solved it and it's gone, the
+    // session carries on by itself.
     captcha() {
-      if (!this.state.active) return;
-      this.stop("Captcha: solve it yourself, then press Start", { silent: true });
+      if (!this.state.active || this.paused()) return;
+      timers.clear(this.nextTimer);
+      timers.clear(this.fallbackTimer);
+      this.state.paused = "captcha";
+      this.state.breakUntil = 0;
+      this.captchaSeenAt = Date.now();
+      this.captchaFrames = new Map();
+      this.save();
+      this.sync();
+      this.say(CAPTCHA_PAUSED);
       alarm.start();
+    },
+    // From each frame, about once a second while paused. The captcha may be
+    // in any one frame; it's gone when no frame shows it any more.
+    captchaState(showing, source) {
+      if (!this.paused()) return;
+      const now = Date.now();
+      (this.captchaFrames ??= new Map()).set(source, { showing, at: now });
+      if ([...this.captchaFrames.values()].some((f) => f.showing && now - f.at < 5000)) {
+        this.captchaSeenAt = now;
+        if (this.message !== CAPTCHA_PAUSED) this.say(CAPTCHA_PAUSED);
+        return;
+      }
+      // Gone for a few seconds (no frame still showing it): carry on.
+      const gone = now - (this.captchaSeenAt ?? 0);
+      if (gone >= CAPTCHA_GONE_MS) this.resume();
+      else this.say("Captcha gone. Carrying on in a moment…");
+    },
+    resume() {
+      if (!this.paused()) return;
+      this.state.paused = "";
+      this.state.beat = Date.now();
+      this.save();
+      alarm.stop();
+      panel.clearToasts?.((title) => title.startsWith(NOTIFY.captcha.title));
+      this.sync();
+      this.say("Captcha solved. Carrying on…");
+      panel.toast?.("normal", "Captcha solved", "The session is carrying on by itself.");
     },
     toggle() {
       if (this.state.active) this.stop("Stopped");
@@ -1973,7 +2152,8 @@
     if (!IS_TOP) return;
     const base = document.title.replace(TITLE_PREFIX, "");
     let prefix = "";
-    if (session.onBreak()) prefix = `❚❚ ${session.state.done}/${session.state.total} · `;
+    if (session.paused()) prefix = `${titleFlash || "❚❚ Captcha"} · `;
+    else if (session.onBreak()) prefix = `❚❚ ${session.state.done}/${session.state.total} · `;
     else if (session.state.active) prefix = `▶ ${session.state.done}/${session.state.total} · `;
     else if (titleFlash) prefix = `${titleFlash} · `;
     if (document.title !== prefix + base) document.title = prefix + base;
@@ -2072,7 +2252,9 @@
   // come back to the tab or press Start.
   const ALARM_REPEAT_MS = 60000;
   const ALARM_MAX = 5;
-  const CAPTCHA_TEXT_BODY = "Nitro Type is asking for a captcha. The session is stopped; solve it yourself, then press Start.";
+  const CAPTCHA_TEXT_BODY = "Nitro Type is asking for a captcha. The session is paused: solve it yourself, and it carries on by itself.";
+  const CAPTCHA_PAUSED = "Paused: solve the captcha and I'll carry on by myself";
+  const CAPTCHA_GONE_MS = 2500; // the captcha has to stay gone this long
   const alarm = {
     on: false,
     count: 0,
@@ -2268,6 +2450,9 @@
       case "captcha":
         session.captcha();
         break;
+      case "captchaState":
+        session.captchaState(Boolean(msg.showing), source);
+        break;
       case "disqualified":
         session.disqualified();
         break;
@@ -2384,7 +2569,17 @@
     .main { display: flex; flex-direction: column; min-height: 0; flex: 1; }
     .collapsed .main { display: none; }
     .live { padding: 10px 12px 8px; border-bottom: 1px solid var(--line); flex: none; }
-    .status { color: var(--sub); overflow-wrap: anywhere; }
+    .status { color: var(--sub); overflow-wrap: anywhere; min-width: 0; flex: 1; }
+    .status-row { display: flex; align-items: center; gap: 8px; }
+    .badge {
+      flex: none; font-size: 10.5px; font-weight: 800; letter-spacing: .4px; text-transform: uppercase;
+      padding: 2px 8px; border-radius: 99px; background: #2b3762; color: #8e9cc9;
+    }
+    .badge.typing { background: rgba(61, 220, 132, .16); color: #6be8a4; }
+    .badge.waiting { background: rgba(245, 166, 35, .16); color: #f5c451; }
+    .badge.break { background: rgba(93, 139, 244, .18); color: #9cc3ff; }
+    .badge.paused { background: rgba(255, 92, 108, .2); color: #ff9aa6; }
+    .badge.done { background: rgba(61, 220, 132, .12); color: #9be8bf; }
     .running .status { color: var(--text); }
     /* mini track: a lane, a car that drives to the checkered finish, a trail */
     .track {
@@ -2478,6 +2673,21 @@
     .range2 span { color: var(--sub); }
     .range2 input[type=number] { width: 100%; }
     .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    /* the Race tab: settings in small groups */
+    .group {
+      display: flex; flex-direction: column; gap: 10px; padding: 10px 10px 11px;
+      border: 1px solid var(--line); border-radius: 10px; background: rgba(10, 14, 30, .28);
+    }
+    .g-head { font-size: 10.5px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; color: var(--sub); }
+    .group input[type=number] { background: var(--bg2); }
+    .seg { display: grid; grid-template-columns: repeat(3, 1fr); padding: 3px; gap: 3px; border-radius: 9px; background: var(--bg); border: 1px solid var(--line); }
+    .seg button {
+      all: unset; cursor: pointer; text-align: center; padding: 5px 4px; border-radius: 7px;
+      font-size: 12px; font-weight: 700; color: var(--sub); transition: background .12s, color .12s;
+    }
+    .seg button:hover { color: var(--text); }
+    .seg button.on { background: var(--accent); color: #1a1f33; }
+    .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     .hint { color: var(--sub); font-size: 11px; margin-top: 3px; }
     .go {
       all: unset; text-align: center; cursor: pointer; padding: 10px; border-radius: 10px;
@@ -2637,6 +2847,7 @@
     .compact .main { flex: none; }
     .compact .live { padding: 8px 12px 6px; border-bottom: 0; }
     .compact .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .compact .badge { font-size: 9.5px; padding: 1px 6px; }
     .compact .track { height: 20px; margin: 6px 0 4px; --car-w: 26px; }
     .compact .chips { flex-wrap: nowrap; overflow: hidden; }
     .compact .go { padding: 6px; margin: 2px 8px 8px; }
@@ -2653,7 +2864,7 @@
       </header>
       <div class="main">
         <div class="live">
-          <div class="status">Idle</div>
+          <div class="status-row"><span class="badge idle">Idle</span><div class="status">Idle</div></div>
           <div class="track"><div class="trail"></div><div class="finish"></div><div class="rivals"></div><div class="car"><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M2.5 10.5V9.4Q3 8 4.4 7.6L6.2 4.8Q7.1 3.5 8.7 3.5H17Q18.8 3.5 20.1 4.8L22.6 7.3H25.6Q27.8 7.6 28 9.6V10.5Z" fill="currentColor"/><path d="M9.2 5H13V7.3H7.8ZM14.4 5H17.2Q18 5 18.6 5.6L20.1 7.3H14.4Z" fill="#0f1426" opacity=".55"/><circle cx="8.3" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/><circle cx="22" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/></svg></div></div>
           <div class="people live-people"></div>
           <div class="result-card" hidden></div>
@@ -2667,46 +2878,61 @@
         </nav>
         <div class="tabs">
           <section data-tab="race" class="on">
-            <div class="field">
-              <div class="lbl">Speed range <b class="wpmLabel"></b></div>
-              <div class="range2">
-                <input type="number" data-k="wpmMin" min="10" max="300"><span>to</span><input type="number" data-k="wpmMax" min="10" max="300">
-              </div>
-              <div class="row adv" style="margin-top:6px"><input type="range" data-k="wpmMin" min="10" max="300"></div>
-              <div class="row adv"><input type="range" data-k="wpmMax" min="10" max="300"></div>
-              <div class="hint adv">Each race picks a random speed in this range.</div>
-            </div>
-            <div class="field">
-              <div class="lbl">Accuracy range <b class="accLabel"></b></div>
-              <div class="range2">
-                <input type="number" data-k="accMin" min="80" max="100" step="0.5"><span>to</span><input type="number" data-k="accMax" min="80" max="100" step="0.5">
-              </div>
-              <div class="row adv" style="margin-top:6px"><input type="range" data-k="accMin" min="80" max="100" step="0.5"></div>
-              <div class="row adv"><input type="range" data-k="accMax" min="80" max="100" step="0.5"></div>
-            </div>
-            <div class="field adv">
-              <div class="lbl">Timing variation <b><span data-show="variance"></span>%</b></div>
-              <div class="row"><input type="range" data-k="variance" min="0" max="60"></div>
-            </div>
-            <div class="pair">
+            <div class="group">
+              <div class="g-head">Speed &amp; accuracy</div>
               <div class="field">
-                <div class="lbl">Nitros / race</div>
-                <input type="number" data-k="nitros" min="0" max="10">
-                <div class="hint adv">Used on the longest words.</div>
+                <div class="lbl">Speed range <b class="wpmLabel"></b></div>
+                <div class="range2">
+                  <input type="number" data-k="wpmMin" min="10" max="300"><span>to</span><input type="number" data-k="wpmMax" min="10" max="300">
+                </div>
+                <div class="row adv" style="margin-top:6px"><input type="range" data-k="wpmMin" min="10" max="300"></div>
+                <div class="row adv"><input type="range" data-k="wpmMax" min="10" max="300"></div>
+                <div class="hint adv">Each race picks a random speed in this range.</div>
               </div>
               <div class="field">
-                <div class="lbl">Races to run</div>
-                <input type="number" data-k="races" min="1" max="500">
-                <div class="hint adv">Clicks "Race Again" in between.</div>
+                <div class="lbl">Accuracy range <b class="accLabel"></b></div>
+                <div class="range2">
+                  <input type="number" data-k="accMin" min="80" max="100" step="0.5"><span>to</span><input type="number" data-k="accMax" min="80" max="100" step="0.5">
+                </div>
+                <div class="row adv" style="margin-top:6px"><input type="range" data-k="accMin" min="80" max="100" step="0.5"></div>
+                <div class="row adv"><input type="range" data-k="accMax" min="80" max="100" step="0.5"></div>
               </div>
             </div>
-            <div class="field adv">
-              <div class="lbl">Long breaks <b class="breakLabel"></b></div>
-              <div class="breaks">
-                <span>Every</span><input type="number" data-k="breakEvery" min="0" max="100"><span>races (0 = off)</span>
-                <div class="len">for <input type="number" data-k="breakLenMin" min="0.1" max="30" step="0.5"> to <input type="number" data-k="breakLenMax" min="0.1" max="30" step="0.5"> min</div>
+            <div class="group">
+              <div class="g-head">Human touch</div>
+              <div class="field">
+                <div class="seg" role="radiogroup" aria-label="Human touch">
+                  <button role="radio" data-human="light">Light</button><button role="radio" data-human="natural">Natural</button><button role="radio" data-human="strong">Strong</button>
+                </div>
+                <div class="hint human-hint"></div>
               </div>
-              <div class="hint">The race count varies a little each time.</div>
+              <div class="field adv">
+                <div class="lbl">Timing variation <b><span data-show="variance"></span>%</b></div>
+                <div class="row"><input type="range" data-k="variance" min="0" max="60"></div>
+              </div>
+            </div>
+            <div class="group">
+              <div class="g-head">Session</div>
+              <div class="pair">
+                <div class="field">
+                  <div class="lbl">Nitros / race</div>
+                  <input type="number" data-k="nitros" min="0" max="10">
+                  <div class="hint adv">Used on the longest words.</div>
+                </div>
+                <div class="field">
+                  <div class="lbl">Races to run</div>
+                  <input type="number" data-k="races" min="1" max="500">
+                  <div class="hint adv">Clicks "Race Again" in between.</div>
+                </div>
+              </div>
+              <div class="field adv">
+                <div class="lbl">Long breaks <b class="breakLabel"></b></div>
+                <div class="breaks">
+                  <span>Every</span><input type="number" data-k="breakEvery" min="0" max="100"><span>races (0 = off)</span>
+                  <div class="len">for <input type="number" data-k="breakLenMin" min="0.1" max="30" step="0.5"> to <input type="number" data-k="breakLenMax" min="0.1" max="30" step="0.5"> min</div>
+                </div>
+                <div class="hint">The race count varies a little each time.</div>
+              </div>
             </div>
           </section>
           <section data-tab="stats">
@@ -2744,7 +2970,7 @@
             <div class="sub-checks">
               <div class="levels-hint">Low: chime · Normal: pop-up · High: chime + pop-up · Urgent: alarm + pop-up that stays</div>
               ${[
-                ["levelCaptcha", "captcha", "Captcha", "Session stopped. Urgent repeats every minute."],
+                ["levelCaptcha", "captcha", "Captcha", "Session pauses, carries on once it's solved. Urgent repeats every minute."],
                 ["levelProblem", "problem", "Problems", "Disqualified, logged out, asleep, stuck"],
                 ["levelSession", "session", "Session done", "Races, WPM, wins, money, XP"],
                 ["levelMilestone", "milestone", "Milestones", "Personal best, win streaks"],
@@ -2920,9 +3146,13 @@
 
     // ---- pop-ups inside the page -----------------------------------------
     const toastBox = $(".toasts");
+    panel.clearToasts = (match) => {
+      for (const el of [...toastBox.children]) if (match(el.dataset.title ?? "")) el.remove();
+    };
     panel.toast = (level, title, body) => {
       const el = document.createElement("div");
       el.className = `toast ${level}`;
+      el.dataset.title = title;
       setHTML(el, `<b></b><button title="Dismiss" aria-label="Dismiss">✕</button><p></p>`);
       el.querySelector("b").textContent = title;
       el.querySelector("p").textContent = body;
@@ -3068,7 +3298,25 @@
       status.dataset.result = result;
       $(".test-notify").blur();
     });
+    const HUMAN_HINTS = {
+      light: "Smooth and steady, with small human quirks.",
+      natural: "Real rhythm: quick common words, slower reaches, a beat after sentences, typos in little bursts.",
+      strong: "Very human: bigger speed swings, longer pauses, a slower start at GO.",
+    };
+    for (const button of $$(".seg [data-human]")) {
+      button.addEventListener("click", () => {
+        applySetting("humanLevel", button.dataset.human);
+        fillLabels();
+        button.blur();
+      });
+    }
     function fillLabels() {
+      for (const button of $$(".seg [data-human]")) {
+        const on = button.dataset.human === settings.humanLevel;
+        button.classList.toggle("on", on);
+        button.setAttribute("aria-checked", String(on));
+      }
+      $(".human-hint").textContent = HUMAN_HINTS[settings.humanLevel] ?? "";
       const span = (a, b, unit) => {
         const lo = Math.min(a, b);
         const hi = Math.max(a, b);
@@ -3162,6 +3410,24 @@
       const typing = Boolean(live?.running);
       box.classList.toggle("running", active || typing);
       box.classList.toggle("alarm", alarm.on); // captcha: red panel
+      box.classList.toggle("paused", session.paused());
+      // The badge: what the script is up to, at a glance.
+      const [badgeClass, badgeText] = session.paused()
+        ? ["paused", "Captcha"]
+        : session.onBreak()
+          ? ["break", "Break"]
+          : typing
+            ? ["typing", "Typing"]
+            : active
+              ? ["waiting", "Waiting"]
+              : alarm.on
+                ? ["paused", "Captcha"]
+                : session.message.startsWith("Done")
+                  ? ["done", "Done"]
+                  : ["idle", "Idle"];
+      const badge = $(".badge");
+      if (badge.className !== `badge ${badgeClass}`) badge.className = `badge ${badgeClass}`;
+      setText(badge, badgeText);
       const soundState = $(".sound-state");
       if (soundState) {
         setText(
