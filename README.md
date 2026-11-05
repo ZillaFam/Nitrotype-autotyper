@@ -12,11 +12,14 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
 - **Long breaks**: optionally take a 1–3 minute (or whatever you set) break roughly every N races. The count varies a little each time. A countdown shows in the panel and the tab title (`❚❚ 8/20 · …`).
 - **Stats with Nitro Type's own results**: after each race it takes your official WPM, accuracy and place from Nitro Type's race state (the same data other Nitro Type userscripts read). **Money and XP** are your totals after the race minus before it: the totals Nitro Type sends with the finishing race update (`rewards.current`), or its saved state (`persist:nt`); the results screen's rewards box is only a fallback. Your login token is never used. Without the race state it reads your own row (`.is-self`) in the results table.
 - **Mini map** (on by default; Panel tab to switch off): a light five-lane map in place of Nitro Type's race track. A block per racer (you in coral, players blue, bots grey, the Wampus orange), start and finish lines, an orange streak when someone uses a nitro, and places at the finish. Nitro Type's track is only hidden, and comes back when you switch the map off. The idea comes from Toonidy's MIT-licensed "Nitro Type - Racing Mini Map" userscript; this is a separate, dependency-free implementation. If it can't find them, it falls back to its own estimate, marked with `~`. Cards for races, average/best WPM, average accuracy, total money and XP; a history table; and a **chart** of WPM per race (hover a point for details). Saved between visits.
-- **Desktop notifications** (Panel tab, each type has its own switch; only when you're not looking at the tab):
-  - after each race: place, WPM, accuracy, money and XP;
-  - level ups and season-pass rewards (from your level/tier in Nitro Type's race state, or the results screen's "Level Up" / "Reward Unlocked" wording);
-  - milestones: new personal-best WPM, 3 wins in a row, every 5th win;
-  - session done, with totals (races, average WPM and accuracy, wins, money, XP).
+- **Desktop notifications** (Panel tab, each type has its own switch; only when you're not looking at the tab, captchas always). By priority, lowest first:
+  1. **After each race** (low, silent): place, WPM, accuracy, money and XP.
+  2. **Level ups and season-pass rewards** (normal): from your totals/tier, or the results screen's "Level Up" / "Reward Unlocked" wording.
+  3. **Milestones** (medium, ★): new personal-best WPM, 3 wins in a row, every 5th win.
+  4. **Session done** (high): totals (races, average WPM and accuracy, wins, money, XP); stays on screen until you dismiss it.
+  5. **Captcha** (urgent): stays on screen, an alarm beep, a flashing `⚠ CAPTCHA` tab title and a red panel, repeated every minute (up to 5 times) until you come back to the tab or press Start. **Test the captcha alert** (Panel tab) shows you exactly what it looks and sounds like.
+
+  Clicking a notification brings you to the race tab.
 - **Captcha pause**: if Nitro Type asks for a captcha, typing stops, the session ends and you get a notification (even with the tab in view). The script never touches the captcha: you solve it, then press Start. The always-on "protected by reCAPTCHA" badge is ignored.
 - **Safety stops**: a session ends (with a notification) instead of carrying on when:
   - the computer was asleep or shut down (a big jump in the clock mid-session, or Chrome restoring the tab afterwards: the session is not resumed);

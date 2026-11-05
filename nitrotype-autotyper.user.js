@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.7.0
+// @version      3.8.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.7.0";
+  const VERSION = "3.8.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -1621,7 +1621,7 @@
   const DEFAULTS = {
     wpmMin: 80, wpmMax: 95, accMin: 96, accMax: 98, variance: 25, nitros: 1, races: 5,
     breakEvery: 0, breakLenMin: 1, breakLenMax: 3, // long break every ~N races (0 = off), minutes
-    notify: false, debug: false, notifyAlways: false,
+    notify: false, debug: false, notifyAlways: false, alarmSound: true,
     // which notifications (all need "notify" on)
     notifyRace: true, notifyLevel: true, notifySeason: true, notifySession: true, notifyMilestone: true, notifyCaptcha: true,
     stopOnLock: false, // stop the session when the computer's screen locks
@@ -1629,7 +1629,7 @@
     miniMap: true, // show a mini map in place of Nitro Type's race track
     keepAlive: true, // keep Nitro Type's page running while minimised (during a session)
   };
-  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap", "keepAlive"];
+  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap", "keepAlive", "alarmSound"];
   const LIMITS = {
     wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
     nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
@@ -1751,6 +1751,8 @@
     },
     start() {
       const s = loadSettings();
+      alarm.stop();
+      alarm.unlock(); // Start is a click: the browser lets the alarm sound later
       this.dqInARow = 0;
       this.state = { active: true, total: s.races, done: 0, sinceBreak: 0, breakAfter: this.pickBreakAfter(s), breakUntil: 0, startAt: Date.now(), beat: Date.now() };
       this.save();
@@ -1832,9 +1834,8 @@
     raceNoteTimers: new Map(),
     captcha() {
       if (!this.state.active) return;
-      titleFlash = "■ Captcha";
       this.stop("Captcha: solve it yourself, then press Start", { silent: true });
-      notify("captcha", "Nitro Type is asking for a captcha. The session is stopped; solve it yourself, then press Start.", { always: true });
+      alarm.start();
     },
     toggle() {
       if (this.state.active) this.stop("Stopped");
@@ -1931,7 +1932,7 @@
 
   // Progress in the tab title, so you can follow a background tab:
   // "▶ 2/5 · Nitro Type", then "✓ Done: 5 races · …" until you look at it.
-  const TITLE_PREFIX = /^(?:[▶✓■]|❚❚) [^·]* · /;
+  const TITLE_PREFIX = /^(?:(?:[▶✓■⚠]|❚❚) [^·]* · )+/; // ours, however many piled up
   let titleFlash = "";
   function updateTitle() {
     if (!IS_TOP) return;
@@ -1954,32 +1955,133 @@
   // Desktop notifications: each type has its own switch, and all need the
   // main switch on and the browser's permission. Only when you're not
   // looking at the tab, except the ones marked "always" (captchas).
+  //
+  // Priority, lowest to highest:
+  //   1 race finished      silent
+  //   2 level up / season  normal (with the system's sound)
+  //   3 milestone          normal, marked with a star
+  //   4 session done       stays on screen until you dismiss it
+  //   5 captcha            stays on screen, re-alerts, plus an alarm in the page
   const NOTIFY = {
-    race: { key: "notifyRace", title: "Race finished" },
-    level: { key: "notifyLevel", title: "Level up!" },
-    season: { key: "notifySeason", title: "Season pass" },
-    session: { key: "notifySession", title: "NT Autotyper session" },
-    milestone: { key: "notifyMilestone", title: "Milestone" },
-    captcha: { key: "notifyCaptcha", title: "Captcha: session stopped" },
+    race: { key: "notifyRace", title: "Race finished", priority: 1 },
+    level: { key: "notifyLevel", title: "Level up!", priority: 2 },
+    season: { key: "notifySeason", title: "Season pass", priority: 2 },
+    milestone: { key: "notifyMilestone", title: "★ Milestone", priority: 3 },
+    session: { key: "notifySession", title: "NT Autotyper session", priority: 4 },
+    captcha: { key: "notifyCaptcha", title: "⚠ CAPTCHA: session stopped", priority: 5 },
   };
   function notify(type, message, { always = false } = {}) {
     const s = loadSettings();
     const kind = NOTIFY[type];
     if (!kind || !s.notify || !s[kind.key]) return;
     if (!always && !s.notifyAlways && !(document.hidden || !document.hasFocus())) return;
-    showNotification(kind.title, message, `nt-autotyper-${type}`);
+    showNotification(kind.title, message, `nt-autotyper-${type}`, kind.priority);
   }
 
-  function showNotification(title, body, tag) {
+  function showNotification(title, body, tag, priority = 2) {
     if (!("Notification" in window) || Notification.permission !== "granted") return false;
     try {
-      new Notification(title, { body, tag, icon: "/favicon.ico" });
+      const n = new Notification(title, {
+        body,
+        tag,
+        icon: "/favicon.ico",
+        silent: priority <= 1, // races: no sound
+        requireInteraction: priority >= 4, // session done, captcha: stay until dismissed
+        renotify: priority >= 5, // captcha: alert again even with the same tag
+      });
+      // Clicking a notification brings you to the race tab.
+      n.onclick = () => {
+        window.focus();
+        n.close();
+      };
       return true;
     } catch {
       /* some browsers only allow notifications from a service worker */
       return false;
     }
   }
+
+  // The captcha alarm: the top-priority notification (re-sent every minute,
+  // up to 5 times), a beep, a flashing tab title and a red panel, until you
+  // come back to the tab or press Start.
+  const ALARM_REPEAT_MS = 60000;
+  const ALARM_MAX = 5;
+  const CAPTCHA_TEXT_BODY = "Nitro Type is asking for a captcha. The session is stopped; solve it yourself, then press Start.";
+  const alarm = {
+    on: false,
+    count: 0,
+    timer: 0,
+    flashTimer: 0,
+    audio: null,
+    // Browsers only allow sound after a click on the page; Start is one.
+    unlock() {
+      try {
+        this.audio ??= new (window.AudioContext || window.webkitAudioContext)();
+        this.audio.resume?.();
+      } catch {
+        this.audio = null;
+      }
+    },
+    beep() {
+      if (!loadSettings().alarmSound || !this.audio) return;
+      try {
+        const ctx = this.audio;
+        const t0 = ctx.currentTime + 0.02;
+        for (let i = 0; i < 3; i++) {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "square";
+          osc.frequency.value = i % 2 ? 660 : 880;
+          gain.gain.setValueAtTime(0.0001, t0 + i * 0.32);
+          gain.gain.exponentialRampToValueAtTime(0.18, t0 + i * 0.32 + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.32 + 0.24);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(t0 + i * 0.32);
+          osc.stop(t0 + i * 0.32 + 0.26);
+        }
+        this.beeps = (this.beeps ?? 0) + 1;
+      } catch {
+        /* no sound, the rest still happens */
+      }
+    },
+    start(test = false) {
+      this.stop();
+      this.on = true;
+      this.count = 0;
+      const ring = () => {
+        if (!this.on) return;
+        this.count++;
+        notify("captcha", test ? "TEST: this is what a captcha alert looks like." : CAPTCHA_TEXT_BODY, { always: true });
+        this.beep();
+        if (this.count < ALARM_MAX) this.timer = timers.set(ring, ALARM_REPEAT_MS);
+      };
+      ring();
+      // Flash the tab title.
+      let flip = false;
+      this.flashTimer = timers.set(function flash() {
+        if (!alarm.on) return;
+        flip = !flip;
+        titleFlash = flip ? "⚠ CAPTCHA" : "■ Captcha";
+        updateTitle();
+        alarm.flashTimer = timers.set(flash, 1000);
+      }, 0);
+      panel.render();
+    },
+    stop() {
+      if (!this.on) return;
+      this.on = false;
+      timers.clear(this.timer);
+      timers.clear(this.flashTimer);
+      titleFlash = "";
+      updateTitle();
+      panel.render();
+    },
+  };
+  // Back at the tab: you've seen it, stop ringing (the message stays).
+  listen(document, "visibilitychange", () => {
+    if (!document.hidden && alarm.on) timers.set(() => !document.hidden && alarm.stop(), 3000);
+  });
+  listen(window, "focus", () => alarm.on && timers.set(() => document.hasFocus() && alarm.stop(), 3000));
 
   // Stop the session when the computer's screen locks (Chrome's Idle
   // Detection; it asks for permission once).
@@ -2325,7 +2427,17 @@
     .check small { display: block; color: var(--sub); font-size: 11px; }
     .sub-checks { display: grid; gap: 7px; padding-left: 22px; }
     .sub-checks.off { opacity: .45; pointer-events: none; }
-    .notify-test { display: grid; gap: 4px; }
+    .notify-test { display: grid; gap: 6px; }
+    .prio { font-style: normal; font-size: 10px; font-weight: 700; padding: 0 6px; border-radius: 99px; margin-left: 4px; vertical-align: 1px; }
+    .prio.p1 { background: #2b3762; color: #8e9cc9; }
+    .prio.p2 { background: #24406a; color: #9cc3ff; }
+    .prio.p3 { background: #4a3d16; color: #f5c451; }
+    .prio.p4 { background: #5a3216; color: #ffb37a; }
+    .prio.p5 { background: #6a1f2a; color: #ff9aa6; }
+    /* captcha alarm: the panel turns red */
+    .box.alarm { border-color: var(--bad); box-shadow: 0 0 0 3px rgba(255, 92, 108, .45), 0 12px 40px rgba(0, 0, 0, .45); animation: alarm 1s steps(2, jump-none) infinite; }
+    .box.alarm .status { color: #ffd0d5; font-weight: 700; }
+    @keyframes alarm { 50% { box-shadow: 0 0 0 3px rgba(255, 92, 108, .1), 0 12px 40px rgba(0, 0, 0, .45); } }
     .notify-status { color: var(--sub); font-size: 11px; }
     .sep { border: 0; border-top: 1px solid var(--line); margin: 0; }
     .breaks { display: grid; grid-template-columns: auto 52px auto; align-items: center; gap: 6px; color: var(--sub); font-size: 12px; }
@@ -2459,15 +2571,16 @@
             <hr class="sep">
             <label class="check"><input type="checkbox" data-k="notify"><span>Desktop notifications<small class="notify-hint">Only when you're not looking at the tab (captchas always).</small></span></label>
             <div class="sub-checks">
-              <label class="check"><input type="checkbox" data-k="notifyRace"><span>After each race<small>Place, WPM, accuracy, money, XP</small></span></label>
-              <label class="check"><input type="checkbox" data-k="notifyLevel"><span>Level ups</span></label>
-              <label class="check"><input type="checkbox" data-k="notifySeason"><span>Season pass rewards</span></label>
-              <label class="check"><input type="checkbox" data-k="notifyMilestone"><span>Milestones<small>Personal best WPM, win streaks</small></span></label>
-              <label class="check"><input type="checkbox" data-k="notifySession"><span>Session done<small>Totals: races, WPM, wins, money, XP</small></span></label>
-              <label class="check"><input type="checkbox" data-k="notifyCaptcha"><span>Captcha (session stopped)</span></label>
+              <label class="check"><input type="checkbox" data-k="notifyCaptcha"><span>Captcha <i class="prio p5">urgent</i><small>Stays on screen, alarm beep, flashing tab, repeats every minute</small></span></label>
+              <label class="check"><input type="checkbox" data-k="notifySession"><span>Session done <i class="prio p4">high</i><small>Stays on screen. Totals: races, WPM, wins, money, XP</small></span></label>
+              <label class="check"><input type="checkbox" data-k="notifyMilestone"><span>Milestones <i class="prio p3">medium</i><small>Personal best WPM, win streaks</small></span></label>
+              <label class="check"><input type="checkbox" data-k="notifyLevel"><span>Level ups <i class="prio p2">normal</i></span></label>
+              <label class="check"><input type="checkbox" data-k="notifySeason"><span>Season pass rewards <i class="prio p2">normal</i></span></label>
+              <label class="check"><input type="checkbox" data-k="notifyRace"><span>After each race <i class="prio p1">low</i><small>Silent. Place, WPM, accuracy, money, XP</small></span></label>
+              <label class="check"><input type="checkbox" data-k="alarmSound"><span>Alarm sound for captchas</span></label>
               <label class="check"><input type="checkbox" data-k="notifyAlways"><span>Also when I'm looking at the tab</span></label>
             </div>
-            <div class="notify-test"><button class="btn2 test-notify">Send a test notification</button><small class="notify-status"></small></div>
+            <div class="notify-test"><button class="btn2 test-notify">Send a test notification</button><button class="btn2 test-alarm">Test the captcha alert</button><small class="notify-status"></small></div>
             <label class="check"><input type="checkbox" data-k="stopOnLock"><span>Stop when my screen locks<small class="lock-hint">Chrome asks for permission once.</small></span></label>
             <label class="check"><input type="checkbox" data-k="debug"><span>Debug view<small>Shows what the script sees on the page. Copy it and send it over if something breaks.</small></span></label>
             <button class="btn2 copy-debug">Copy debug info</button>
@@ -2691,6 +2804,18 @@
               ? "This browser can't show desktop notifications."
               : "Not allowed yet: the test button will ask.";
     }
+    $(".test-alarm").addEventListener("click", async () => {
+      if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission().catch(() => {});
+      alarm.unlock();
+      if (alarm.on) alarm.stop();
+      else {
+        // One ring only, then stop on its own.
+        alarm.start(true);
+        timers.clear(alarm.timer);
+        timers.set(() => alarm.stop(), 6000);
+      }
+      $(".test-alarm").blur();
+    });
     $(".test-notify").addEventListener("click", async () => {
       if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission().catch(() => {});
       const ok = showNotification("NT Autotyper", "Test: notifications are working.", "nt-autotyper-test");
@@ -2793,6 +2918,7 @@
       const live = statuses.filter((s) => s.running).pop() ?? statuses.filter((s) => s.hasRace).pop();
       const typing = Boolean(live?.running);
       box.classList.toggle("running", active || typing);
+      box.classList.toggle("alarm", alarm.on); // captcha: red panel
 
       // Whichever spoke last: the engine typing the race, or the session.
       $(".status").textContent = live && (typing || live.at > session.messageAt) ? live.message : session.message;

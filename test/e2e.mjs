@@ -242,8 +242,27 @@ try {
         static requestPermission = async () => "granted";
         constructor(title, opts) {
           window.__notes.push(`${title}: ${opts?.body}`);
+          (window.__noteOpts ||= []).push({ title, ...opts });
         }
       };
+    });
+    await page.evaluate(() => {
+      // Count alarm beeps instead of making noise.
+      window.__beeps = 0;
+      window.AudioContext = class {
+        constructor() {
+          this.currentTime = 0;
+          this.destination = {};
+        }
+        resume() {}
+        createGain() {
+          return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: (x) => x };
+        }
+        createOscillator() {
+          return { frequency: {}, connect: (x) => x, start: () => window.__beeps++, stop() {} };
+        }
+      };
+      document.title = "Nitro Type";
     });
     await page.waitForTimeout(1200);
     check(`${name}: the always-on reCAPTCHA badge isn't a captcha`, (await page.locator(".go").textContent()) === "Start" && !(await status(page)).includes("Captcha"));
@@ -256,8 +275,84 @@ try {
     check(`${name}: typing stops`, (await typed()) === t1, `${t1} letters`);
     check(`${name}: session stopped with a message`, (await status(page)) === "Captcha: solve it yourself, then press Start" && (await page.locator(".go").textContent()) === "Start", await status(page));
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: notification (even with the tab in view)`, notes.length === 1 && notes[0].startsWith("Captcha: session stopped: "), JSON.stringify(notes));
+    check(`${name}: notification (even with the tab in view)`, notes.length === 1 && notes[0].startsWith("⚠ CAPTCHA: session stopped: "), JSON.stringify(notes));
     check(`${name}: never clicks the captcha`, (await page.evaluate(() => window.__captchaClicks)) === 0);
+    const opts = (await page.evaluate(() => window.__noteOpts))[0];
+    check(`${name}: urgent: stays on screen and re-alerts`, opts.requireInteraction === true && opts.renotify === true && opts.silent === false, JSON.stringify(opts));
+    check(`${name}: alarm beeps`, (await page.evaluate(() => window.__beeps)) >= 3);
+    check(`${name}: panel turns red`, (await page.locator(".box.alarm").count()) === 1);
+    const titles = new Set();
+    for (let i = 0; i < 4; i++) {
+      titles.add((await page.title()).split(" · ")[0]);
+      await page.waitForTimeout(500);
+    }
+    check(`${name}: tab title flashes`, titles.has("⚠ CAPTCHA") && titles.has("■ Captcha"), [...titles].join(" / "));
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "captcha-alarm.png") });
+    // You solve the captcha, then press Start.
+    await page.evaluate(() => document.querySelector(".captcha-modal").remove());
+    await page.waitForTimeout(1600);
+    await page.locator(".go").click();
+    await page.waitForTimeout(500);
+    check(`${name}: pressing Start ends the alarm`, (await page.locator(".box.alarm").count()) === 0 && !(await page.title()).includes("CAPTCHA"), await page.title());
+    await context.close();
+  });
+
+  await test("notification priorities", async (name) => {
+    const { context, page } = await open("?levelup=1&countdown=300", { ...BASE, wpmMin: 200, wpmMax: 200, races: 1, notify: true, notifyAlways: true }, null, () => {
+      window.__notes = [];
+      window.__noteOpts = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+          window.__noteOpts.push({ title, ...opts });
+          this.title = title;
+        }
+        close() {}
+      };
+      if (!localStorage.getItem("nt-autotyper-stats")) {
+        const old = Array.from({ length: 5 }, (_, i) => ({ wpm: 60, accuracy: 95, at: Date.now() - 86400000 + i, target: 60 }));
+        localStorage.setItem("nt-autotyper-stats", JSON.stringify(old));
+      }
+    });
+    await page.locator(".go").click();
+    await waitForResults(page, 1);
+    await page.waitForTimeout(8000);
+    const opts = await page.evaluate(() => window.__noteOpts);
+    const byTitle = (t) => opts.find((o) => o.title === t) ?? {};
+    const race = byTitle("Race finished");
+    const level = byTitle("Level up!");
+    const milestone = byTitle("★ Milestone");
+    const session = byTitle("NT Autotyper session");
+    check(`${name}: race (low): silent`, race.silent === true && race.requireInteraction === false, JSON.stringify(race));
+    check(`${name}: level up (normal): with sound, goes away by itself`, level.silent === false && level.requireInteraction === false, JSON.stringify(level));
+    check(`${name}: milestone (medium): with sound, starred`, milestone.silent === false && milestone.requireInteraction === false, JSON.stringify(milestone));
+    check(`${name}: session done (high): stays on screen`, session.requireInteraction === true && session.renotify === false, JSON.stringify(session));
+    await context.close();
+  });
+
+  await test("captcha alert test button", async (name) => {
+    const { context, page } = await open("", { ...BASE, notify: true }, null, () => {
+      window.__notes = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+        }
+        close() {}
+      };
+    });
+    await page.locator('nav button[data-tab="panel"]').click();
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-notify-priorities.png") });
+    await page.locator(".test-alarm").click();
+    await page.waitForTimeout(300);
+    const notes = await page.evaluate(() => window.__notes);
+    check(`${name}: sends the urgent test alert`, notes.length === 1 && notes[0] === "⚠ CAPTCHA: session stopped: TEST: this is what a captcha alert looks like.", JSON.stringify(notes));
+    check(`${name}: panel turns red`, (await page.locator(".box.alarm").count()) === 1);
+    await page.waitForTimeout(6500);
+    check(`${name}: stops by itself`, (await page.locator(".box.alarm").count()) === 0);
     await context.close();
   });
 
@@ -276,6 +371,7 @@ try {
           static requestPermission = async () => "granted";
           constructor(title, opts) {
             window.__notes.push(`${title}: ${opts?.body}`);
+          (window.__noteOpts ||= []).push({ title, ...opts });
           }
         };
         if (!localStorage.getItem("nt-autotyper-stats")) {
@@ -298,7 +394,7 @@ try {
     );
     check(`${name}: level up`, notes.includes(`Level up!: You reached level ${rs[0].shown_level}!`) && notes.includes(`Level up!: You reached level ${rs[1].shown_level}!`), JSON.stringify(notes));
     check(`${name}: season pass`, notes.includes(`Season pass: Season pass tier ${rs[0].shown_season} unlocked`), JSON.stringify(notes));
-    check(`${name}: personal best`, notes.some((n) => /^Milestone: New personal best: \d+ WPM!$/.test(n)), JSON.stringify(notes));
+    check(`${name}: personal best`, notes.some((n) => /^★ Milestone: New personal best: \d+ WPM!$/.test(n)), JSON.stringify(notes));
     const summary = notes[notes.length - 1];
     const money = rs.reduce((a, r) => a + r.shown.money, 0);
     check(`${name}: session summary last, with totals`, summary.startsWith("NT Autotyper session: 2 races · avg ") && summary.includes(`+$${money.toLocaleString()}`) && summary.includes("XP"), summary);
@@ -375,6 +471,7 @@ try {
         static requestPermission = async () => "granted";
         constructor(title, opts) {
           window.__notes.push(`${title}: ${opts?.body}`);
+          (window.__noteOpts ||= []).push({ title, ...opts });
         }
       };
     });
@@ -399,6 +496,7 @@ try {
         static requestPermission = async () => "granted";
         constructor(title, opts) {
           window.__notes.push(`${title}: ${opts?.body}`);
+          (window.__noteOpts ||= []).push({ title, ...opts });
         }
       };
     });
@@ -425,6 +523,7 @@ try {
         static requestPermission = async () => "granted";
         constructor(title, opts) {
           window.__notes.push(`${title}: ${opts?.body}`);
+          (window.__noteOpts ||= []).push({ title, ...opts });
         }
       };
     });
@@ -591,6 +690,7 @@ try {
       static requestPermission = async () => "granted";
       constructor(title, opts) {
         window.__notes.push(`${title}: ${opts?.body}`);
+        (window.__noteOpts ||= []).push({ title, ...opts });
       }
     };
   }
