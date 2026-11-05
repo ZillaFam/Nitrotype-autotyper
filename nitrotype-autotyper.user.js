@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.6.0
+// @version      3.7.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.6.0";
+  const VERSION = "3.7.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -133,6 +133,13 @@
   // all of the script's timing runs through one. If the page blocks workers,
   // it falls back to normal timers (then keep the tab visible).
 
+  const pageSetTimeout = window.setTimeout.bind(window);
+  const pageClearTimeout = window.clearTimeout.bind(window);
+  const pageSetInterval = window.setInterval.bind(window);
+  const pageClearInterval = window.clearInterval.bind(window);
+  const pageRequestFrame = window.requestAnimationFrame?.bind(window);
+  const pageCancelFrame = window.cancelAnimationFrame?.bind(window);
+
   const timers = (() => {
     const pending = new Map(); // id -> { fn, due, native }
     let nextId = 1;
@@ -149,7 +156,7 @@
       worker = null;
       LOG("worker timers unavailable; background tabs will be throttled");
       for (const [id, t] of pending) {
-        if (!t.native) t.native = window.setTimeout(() => fire(id), t.due - performance.now());
+        if (!t.native) t.native = pageSetTimeout(() => fire(id), t.due - performance.now());
       }
     };
 
@@ -176,14 +183,14 @@
         const t = { fn, due: performance.now() + ms, native: 0 };
         pending.set(id, t);
         if (worker) worker.postMessage(["set", id, Math.max(0, ms)]);
-        else t.native = window.setTimeout(() => fire(id), ms);
+        else t.native = pageSetTimeout(() => fire(id), ms);
         return id;
       },
       clear(id) {
         const t = pending.get(id);
         if (!t) return;
         pending.delete(id);
-        if (t.native) window.clearTimeout(t.native);
+        if (t.native) pageClearTimeout(t.native);
         else worker?.postMessage(["clear", id]);
       },
       every(fn, ms) {
@@ -195,6 +202,131 @@
       },
     };
   })();
+
+  // =========================================================================
+  // 1c. Keep Nitro Type's page running while minimised
+  // =========================================================================
+  //
+  // In a minimised window or a hidden tab, Chrome stops screen refreshes
+  // (requestAnimationFrame) completely and slows the page's own timers to
+  // once a second, then once a minute. The script's typing doesn't care (it
+  // uses the worker timers above), but Nitro Type's page does: if its race
+  // loop stops, your progress stops reaching the server and you get
+  // "disqualified due to inactivity".
+  //
+  // So, only while the page is hidden AND a session is running here, Nitro
+  // Type's frames (~15 a second) and timers run on the worker timers. While
+  // visible, or with no session, everything passes straight through.
+
+  const HIDDEN_FRAME_MS = 66;
+  let keepAliveWanted = false; // set by the engine: session armed + setting on
+  const keepAliveActive = () => keepAliveWanted && document.hidden && timers.usingWorker;
+
+  // requestAnimationFrame: the real one, plus a worker-timer backup while hidden.
+  const frames = new Map(); // id -> { cb, native, backup }
+  let frameSeq = 0;
+  function runFrame(id, time) {
+    const f = frames.get(id);
+    if (!f) return;
+    frames.delete(id);
+    if (f.native && pageCancelFrame) pageCancelFrame(f.native);
+    timers.clear(f.backup);
+    f.cb(time);
+  }
+  function backupFrame(id) {
+    const f = frames.get(id);
+    if (f && !f.backup) f.backup = timers.set(() => runFrame(id, performance.now()), HIDDEN_FRAME_MS);
+  }
+  if (pageRequestFrame) {
+    window.requestAnimationFrame = function (cb) {
+      const id = ++frameSeq;
+      const f = { cb, native: 0, backup: 0 };
+      frames.set(id, f);
+      f.native = pageRequestFrame((t) => runFrame(id, t));
+      if (keepAliveActive()) backupFrame(id);
+      return id;
+    };
+    window.cancelAnimationFrame = function (id) {
+      const f = frames.get(id);
+      if (!f) return;
+      frames.delete(id);
+      pageCancelFrame?.(f.native);
+      timers.clear(f.backup);
+    };
+  }
+
+  // setTimeout / setInterval: worker timers while hidden and racing.
+  // Our ids live above 2^30 so they never clash with the page's own.
+  const ID_BASE = 2 ** 30;
+  let timerSeq = ID_BASE;
+  const pageTimers = new Map(); // id -> { fn, args, ms, repeat, native, worker }
+  const callTimer = (fn, args) => (typeof fn === "function" ? fn(...args) : (0, eval)(String(fn)));
+
+  function armTimer(id) {
+    const t = pageTimers.get(id);
+    if (!t) return;
+    const useWorker = keepAliveActive();
+    if (useWorker && !t.worker) {
+      if (t.native) (t.repeat ? pageClearInterval : pageClearTimeout)(t.native);
+      t.native = 0;
+      const tick = () => {
+        if (!pageTimers.has(id)) return;
+        if (t.repeat) t.worker = timers.set(tick, Math.max(4, t.ms));
+        else pageTimers.delete(id);
+        callTimer(t.fn, t.args);
+      };
+      t.worker = timers.set(tick, Math.max(4, t.ms)); // 4 ms floor, like the browser's own
+    } else if (!useWorker && t.repeat && t.worker) {
+      // Back to the page's own interval when visible again.
+      timers.clear(t.worker);
+      t.worker = 0;
+      t.native = pageSetInterval(() => callTimer(t.fn, t.args), t.ms);
+    }
+  }
+
+  window.setTimeout = function (fn, ms = 0, ...args) {
+    if (!keepAliveActive()) return pageSetTimeout(fn, ms, ...args);
+    const id = ++timerSeq;
+    pageTimers.set(id, { fn, args, ms: Number(ms) || 0, repeat: false, native: 0, worker: 0 });
+    armTimer(id);
+    return id;
+  };
+  window.setInterval = function (fn, ms = 0, ...args) {
+    // Intervals are long-lived, so they're always tracked: one created while
+    // visible must still switch over when the window is minimised.
+    const id = ++timerSeq;
+    const t = { fn, args, ms: Number(ms) || 0, repeat: true, native: 0, worker: 0 };
+    pageTimers.set(id, t);
+    if (keepAliveActive()) armTimer(id);
+    else t.native = pageSetInterval(fn, ms, ...args);
+    return id;
+  };
+  const clearOurs = (id) => {
+    const t = pageTimers.get(id);
+    if (!t) return false;
+    pageTimers.delete(id);
+    if (t.native) (t.repeat ? pageClearInterval : pageClearTimeout)(t.native);
+    timers.clear(t.worker);
+    return true;
+  };
+  window.clearTimeout = function (id) {
+    if (!clearOurs(id)) pageClearTimeout(id);
+  };
+  window.clearInterval = function (id) {
+    if (!clearOurs(id)) pageClearInterval(id);
+  };
+
+  // Hidden/visible or session on/off: move what's pending to the right clock.
+  function refreshKeepAlive() {
+    if (keepAliveActive()) for (const id of frames.keys()) backupFrame(id);
+    for (const [id, t] of pageTimers) if (t.repeat) armTimer(id);
+  }
+  function setKeepAlive(on) {
+    if (on === keepAliveWanted) return;
+    keepAliveWanted = on;
+    refreshKeepAlive();
+  }
+  nativeAdd.call(document, "visibilitychange", refreshKeepAlive);
 
   // =========================================================================
   // 2. Keyboard knowledge (US QWERTY)
@@ -1246,6 +1378,7 @@
           return `money ${t.money ?? "?"}, XP ${t.xp ?? "?"}, level ${t.level ?? "?"}`;
         })(),
         miniMap: miniMap.host ? "on (race track hidden)" : engine.settings?.miniMap ? "waiting for the race track" : "off",
+        keepAlive: !engine.settings?.keepAlive ? "off" : keepAliveActive() ? `ACTIVE (hidden; ${frames.size} frames, ${pageTimers.size} timers on the worker clock)` : document.hidden ? "ready (no session)" : "ready (tab visible)",
         timers: timers.usingWorker ? "worker (full speed in background)" : "page timers (slowed in background)",
       };
     },
@@ -1464,6 +1597,7 @@
     if (msg.settings) engine.settings = msg.settings;
     if (typeof msg.focus === "boolean") engine.focusOpen = msg.focus;
     if (typeof msg.armed === "boolean") engine.setArmed(msg.armed);
+    setKeepAlive(Boolean(engine.armed && engine.settings?.keepAlive));
     if (msg.cmd === "next") engine.nextRace();
     if (msg.cmd === "leaveDq") engine.leaveDisqualified();
     if (msg.cmd === "reload") engine.reloadRace();
@@ -1493,8 +1627,9 @@
     stopOnLock: false, // stop the session when the computer's screen locks
     lite: false, // Low-FPS mode: fewer panel updates, no animations
     miniMap: true, // show a mini map in place of Nitro Type's race track
+    keepAlive: true, // keep Nitro Type's page running while minimised (during a session)
   };
-  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap"];
+  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap", "keepAlive"];
   const LIMITS = {
     wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
     nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
@@ -2317,6 +2452,7 @@
               <div class="row"><input type="range" class="opacity" min="20" max="100"></div>
             </div>
             <div class="hint">Drag the header to move the panel, drag the bottom-right corner to resize it, ⊟ for compact mode, ▾ to collapse it.</div>
+            <label class="check"><input type="checkbox" data-k="keepAlive"><span>Keep Nitro Type running when minimised<small>During a session, Nitro Type's page keeps updating even when its window is minimised or hidden, so it doesn't look idle.</small></span></label>
             <label class="check"><input type="checkbox" data-k="miniMap"><span>Mini map instead of the race track<small>A light five-lane map of every racer, in place of Nitro Type's track.</small></span></label>
             <label class="check"><input type="checkbox" data-k="lite"><span>Low-FPS mode<small>For slow computers: no animations, no live standings, and the panel updates once a second.</small></span></label>
             <button class="btn2 reset-panel">Reset position and size</button>

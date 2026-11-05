@@ -617,6 +617,53 @@ try {
     await context.close();
   });
 
+  // A minimised window, as Chrome treats it: hidden, no screen refreshes at
+  // all, timeouts slowed to 1 s and long-running timers to once a minute.
+  function simulateMinimised() {
+    const realSetTimeout = window.setTimeout;
+    const realSetInterval = window.setInterval;
+    window.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, Math.max(1000, ms || 0), ...args);
+    window.setInterval = (fn, ms, ...args) => realSetInterval(fn, Math.max(60000, ms || 0), ...args);
+    let frameIds = 0;
+    window.requestAnimationFrame = () => ++frameIds; // never fires
+    window.cancelAnimationFrame = () => {};
+    Object.defineProperty(document, "hidden", { get: () => true });
+    Object.defineProperty(document, "visibilityState", { get: () => "hidden" });
+  }
+
+  await test("minimised without keep-alive: the mock really goes idle", async (name) => {
+    const { context, page } = await open("?afk=1&countdown=500", { ...BASE, wpmMin: 100, wpmMax: 100, races: 1, keepAlive: false }, null, simulateMinimised);
+    await page.locator(".go").click();
+    await page.waitForFunction(() => window.__afkDq, null, { timeout: 30000 }).catch(() => {});
+    check(`${name}: disqualified for inactivity (reproduces the problem)`, await page.evaluate(() => window.__afkDq === true));
+    await context.close();
+  });
+
+  await test("minimised with keep-alive: races normally", async (name) => {
+    const { context, page } = await open("?afk=1&countdown=500", { ...BASE, wpmMin: 100, wpmMax: 100, races: 2 }, null, simulateMinimised);
+    await page.locator(".go").click();
+    const rs = await waitForResults(page, 2, 120000).catch(() => []);
+    check(`${name}: never disqualified`, (await page.evaluate(() => window.__afkDq)) === false);
+    check(`${name}: both races finished`, rs.length === 2, `${rs.length} race(s)`);
+    for (const r of rs) check(`${name}: speed still right`, Math.abs(r.wpm - 100) / 100 < 0.1, `got ${r.wpm.toFixed(1)}`);
+    check(`${name}: bots kept moving too`, rs.every((r) => r.shown?.place >= 1));
+    await context.close();
+  });
+
+  await test("keep-alive stays out of the way when visible", async (name) => {
+    const { context, page } = await open("?countdown=300", { ...BASE });
+    const info = await page.evaluate(() => {
+      const id = setTimeout(() => {}, 10);
+      const iv = setInterval(() => {}, 1000);
+      clearInterval(iv);
+      return { timeoutId: id, intervalIsOurs: iv >= 2 ** 30 };
+    });
+    check(`${name}: visible timeouts go straight to the browser`, info.timeoutId < 2 ** 30, JSON.stringify(info));
+    let frames = await page.evaluate(() => new Promise((res) => { let n = 0; const f = () => (++n < 10 ? requestAnimationFrame(f) : res(n)); requestAnimationFrame(f); }));
+    check(`${name}: frames still run normally`, frames === 10);
+    await context.close();
+  });
+
   await test("workers blocked: falls back to normal timers", async (name) => {
     const { context, page } = await open("", { ...BASE, wpmMin: 130, wpmMax: 130 }, null, () => {
       window.Worker = function () {

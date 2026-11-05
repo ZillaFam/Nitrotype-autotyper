@@ -26,6 +26,10 @@
     loggedout=1                                the race state says you're logged out
     rewards=hidden                             no rewards box on the results screen (money/XP must come from totals)
     server=none                                no race-update events (money/XP must come from the saved state)
+    afk=1                                      like Nitro Type (probably): the race loop runs on screen frames and
+                                               progress goes to the "server" on a page timer; the server (its own
+                                               worker, unaffected by the tab being hidden) disqualifies you for
+                                               inactivity after 5 s with no progress reported
   Your account totals live in localStorage "persist:nt" (like Nitro Type) and
   arrive with the finishing race update as racer.rewards.current. The race
   track is a <canvas> in #raceContainer.
@@ -375,6 +379,43 @@
           document.removeEventListener("keydown", check);
         });
         document.dispatchEvent(probe);
+
+        if (params.get("afk") === "1") {
+          let framePos = 0;
+          let lastSent = Date.now();
+          let sentPos = 0;
+          window.__afkDq = false;
+          // The race loop: runs on screen frames (stops when the tab is hidden).
+          const frame = () => {
+            if (race) framePos = race.pos;
+            requestAnimationFrame(frame);
+          };
+          requestAnimationFrame(frame);
+          // Progress to the server: on a page timer (slowed when hidden).
+          setInterval(() => {
+            if (framePos !== sentPos) {
+              sentPos = framePos;
+              lastSent = Date.now();
+            }
+          }, 300);
+          // The server's inactivity check: not affected by the tab at all.
+          const server = new Worker(URL.createObjectURL(new Blob(["setInterval(() => postMessage(0), 300)"], { type: "text/javascript" })));
+          server.onmessage = () => {
+            const r = race;
+            if (!r || !r.started || r.dead || r.pos >= r.text.length) {
+              lastSent = Date.now();
+              return;
+            }
+            if (Date.now() - lastSent > 5000) {
+              r.dead = true;
+              window.__afkDq = true;
+              document.body.insertAdjacentHTML(
+                "beforeend",
+                `<div class="modal modal--raceError" id="afkdq"><h2>Disqualified!</h2><p>Uh oh! You have been disqualified due to inactivity.</p><button class="garage">Go To Your Garage</button></div>`,
+              );
+            }
+          };
+        }
 
         if (params.get("inrace") === "1" && !sessionStorage.getItem("mock-inrace-done")) {
           document.body.insertAdjacentHTML(

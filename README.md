@@ -35,11 +35,16 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
 
 ## Running in the background
 
-Start a session, then switch to another tab or window. It keeps going: all of its timing runs in a Web Worker, which Chrome doesn't slow down the way it slows down background tabs. Watch the tab title for progress.
+Start a session, then switch to another tab, or **minimise the window**. It keeps going:
+
+- The script's own typing runs on a Web Worker clock, which Chrome doesn't slow down in background tabs.
+- **Keep Nitro Type running when minimised** (on by default, Panel tab): in a minimised or hidden window Chrome stops screen refreshes and slows the page's timers to once a second, then once a minute. That freezes Nitro Type's own page, so your progress stops reaching the server and you get *disqualified due to inactivity*. While the window is hidden **and** a session is running, the script gives Nitro Type's page ~15 frames a second and runs its timers on the worker clock. While visible, or without a session, nothing changes.
+
+Watch the tab title for progress, and turn on notifications to hear about each race.
 
 - **The tab has to stay open.** A closed tab can't run anything, so it can't type either.
 - **Stop Chrome from putting the tab to sleep.** Go to `chrome://settings/performance` → Memory Saver → **Always keep these sites active** → add `nitrotype.com`. Otherwise Chrome may discard the tab after a while in the background.
-- Don't minimise the whole browser for long periods. Some systems pause minimised windows harder than background tabs.
+- Prefer racing in a separate browser (e.g. Edge with Tampermonkey) if you want Chrome free for everything else; the script works the same there, and that window can stay minimised.
 - If Nitro Type blocks Web Workers, the script falls back to normal timers. A background tab then gets slowed down, so keep it visible.
 
 ## Performance
@@ -90,7 +95,7 @@ If you had pasted an older version in by hand, open the install link once; Tampe
   1. Browser: padlock icon in the address bar → Notifications → **Allow** for nitrotype.com.
   2. Windows: Settings → System → Notifications → turn on **Google Chrome** (or your browser), and turn off **Do not disturb** / Focus. macOS: System Settings → Notifications → **Google Chrome** → Allow, and check Focus.
   3. By default they only appear when you're **not** looking at the Nitro Type tab; tick **Also when I'm looking at the tab** to get them always.
-- **"Disqualified due to inactivity".** Nitro Type stopped seeing your car move. Most often the tab was minimised or fully hidden: Nitro Type's own page may pause in a hidden tab even though the script keeps typing. Keep the Nitro Type window visible (it can be small and to the side). Two in a row stop the session.
+- **"Disqualified due to inactivity".** Nitro Type stopped seeing your car move. Most often the tab was minimised or fully hidden: check that **Keep Nitro Type running when minimised** is on (the debug view's `keepAlive:` line says `ACTIVE` while the window is hidden during a session). If it still happens, keep the window visible and send the debug info. Two in a row stop the session.
 - **"Currently in a Race" popup.** Nitro Type shows this when you leave a race before it ends; it makes you wait until that race disqualifies you. If it appears during a session, the script waits 20–30 seconds and presses **Try Again** for you (never "Go To Your Garage"). The script itself never reloads or leaves the page during a race, its lobby or its countdown: it only moves on from a results screen.
 - **Nothing types at all.** Check that Tampermonkey's Content Script API setting is "UserScripts API Dynamic" (see above). If the race is in an iframe on a domain other than `nitrotype.com`, add a `// @match` line for it.
 
