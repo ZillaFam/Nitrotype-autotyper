@@ -927,11 +927,44 @@ try {
     await context.close();
   });
 
-  await test("logged out: stops", async (name) => {
+  await test("logged out: reloads once to reconnect, then stops", async (name) => {
     const { context, page } = await open("?loggedout=1&countdown=300", { ...BASE, races: 3 });
     await page.locator(".go").click();
-    await page.waitForTimeout(2000);
-    check(`${name}: session stopped, nothing typed`, (await status(page)) === "Stopped: you're logged out of Nitro Type" && (await page.evaluate(() => document.querySelectorAll(".is-typed").length)) === 0, await status(page));
+    await page.waitForTimeout(1500);
+    check(`${name}: tries a fresh page first`, (await status(page)).startsWith("Nitro Type shows you as logged out. Reloading the race page"), await status(page));
+    const stopped = await page
+      .waitForFunction(() => {
+        const host = [...document.querySelectorAll("body > div")].find((d) => d.shadowRoot?.querySelector(".box"));
+        return host?.shadowRoot.querySelector(".status")?.textContent.startsWith("Stopped: you're logged out");
+      }, null, { timeout: 30000 })
+      .then(() => true, () => false);
+    check(`${name}: still logged out after the reload: stops`, stopped && (await status(page)) === "Stopped: you're logged out of Nitro Type. Log back in, then press Start.", await status(page));
+    check(`${name}: reloaded once`, (await page.evaluate(() => window.__loads)) === 2);
+    check(`${name}: nothing typed`, (await page.evaluate(() => document.querySelectorAll(".is-typed").length)) === 0);
+    await context.close();
+  });
+
+  await test("disconnected between races: reconnects and carries on", async (name) => {
+    const { context, page } = await open("?idlekick=once&countdown=300", { ...BASE, wpmMin: 180, wpmMax: 180, races: 2, notify: true }, null, () => {
+      window.__notes = [];
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+        }
+      };
+    });
+    await page.locator(".go").click();
+    await page.waitForFunction(() => window.__kicked, null, { timeout: 60000 });
+    await page.waitForTimeout(1500);
+    check(`${name}: says it's reconnecting`, (await status(page)).startsWith("Nitro Type dropped the connection. Reloading"), await status(page));
+    const notes = await page.evaluate(() => window.__notes);
+    check(`${name}: notification`, notes.some((n) => n.startsWith("Reconnecting · racer_me: Nitro Type dropped the connection")), JSON.stringify(notes));
+    const rs = await waitForResults(page, 2, 60000);
+    check(`${name}: raced again after a fresh page`, rs.length === 2 && (await page.evaluate(() => window.__loads)) === 2, `loads ${await page.evaluate(() => window.__loads)}`);
+    await page.waitForTimeout(1500);
+    check(`${name}: session finished`, (await status(page)) === "Done: 2 races", await status(page));
     await context.close();
   });
 
@@ -1177,6 +1210,40 @@ try {
     check(`${name}: both races finished`, rs.length === 2, `${rs.length} race(s)`);
     for (const r of rs) check(`${name}: speed still right`, Math.abs(r.wpm - 100) / 100 < 0.1, `got ${r.wpm.toFixed(1)}`);
     check(`${name}: bots kept moving too`, rs.every((r) => r.shown?.place >= 1));
+    await context.close();
+  });
+
+  // A server that drops connections idle for 5 s, during a 9 s break.
+  const BREAK = { breakEvery: 1, breakLenMin: 0.15, breakLenMax: 0.15 };
+  await test("minimised through a break, keep-alive off: connection dropped (reproduces it)", async (name) => {
+    const { context, page } = await open("?idlekick=1&countdown=300", { ...BASE, wpmMin: 180, wpmMax: 180, races: 2, keepAlive: false, ...BREAK }, null, simulateMinimised);
+    await page.locator(".go").click();
+    // (it then reloads to reconnect, so look in sessionStorage)
+    let kicks = null;
+    for (let i = 0; i < 40 && !kicks; i++) {
+      await page.waitForTimeout(1000);
+      kicks = await page.evaluate(() => sessionStorage.getItem("mock-kicks")).catch(() => null);
+    }
+    check(`${name}: disconnected`, Number(kicks) >= 1, `kicks ${kicks}`);
+    await context.close();
+  });
+
+  await test("minimised through a break: keep-alive holds the connection", async (name) => {
+    const { context, page } = await open("?idlekick=1&countdown=300", { ...BASE, wpmMin: 180, wpmMax: 180, races: 2, ...BREAK }, null, simulateMinimised);
+    await page.locator(".go").click();
+    const rs = await waitForResults(page, 2, 120000).catch(() => []);
+    check(`${name}: both races, with the break in between`, rs.length === 2, `${rs.length} race(s)`);
+    check(`${name}: never disconnected`, (await page.evaluate(() => sessionStorage.getItem("mock-kicks"))) === null && (await page.evaluate(() => window.__kicked)) === false);
+    await context.close();
+  });
+
+  await test("long break: next race from a fresh page", async (name) => {
+    const { context, page } = await open("?countdown=300", { ...BASE, wpmMin: 180, wpmMax: 180, races: 2, breakEvery: 1, breakLenMin: 0.1, breakLenMax: 0.1 }, null, () => (window.__ntAutotyperLongBreakMs = 3000));
+    await page.locator(".go").click();
+    const rs = await waitForResults(page, 2, 90000);
+    check(`${name}: reloaded once, after the break`, rs.length === 2 && (await page.evaluate(() => window.__loads)) === 2, `loads ${await page.evaluate(() => window.__loads)}`);
+    await page.waitForTimeout(1500);
+    check(`${name}: session finished`, (await status(page)) === "Done: 2 races", await status(page));
     await context.close();
   });
 

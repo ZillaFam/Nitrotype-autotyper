@@ -25,6 +25,10 @@
     captcha=1                                  a captcha appears mid-race, once (the race freezes); clicks on it are counted in window.__captchaClicks;
                                                window.__solveCaptcha() is you solving it (it goes away, the race goes on)
     status=none                                no "status" events (countdown / racing) from the race server
+    idlekick=1                                 like a server that drops idle connections: the page sends a heartbeat on a
+                                               page timer (every 1 s); 5 s without one and you're disconnected (popup,
+                                               logged out, Race Again stops working). Counted in sessionStorage "mock-kicks".
+    idlekick=once                              disconnected once, 2 s after the first race (first page load only)
     levelup=1                                  each race levels you up (state + "Level Up!" on the results screen)
     season=1                                   each race unlocks a season pass tier
     dq=1 | dq=all                              the first race (or every race) ends in Nitro Type's "Disqualified!" popup
@@ -398,11 +402,16 @@
                  ${extras.join("")}
                </div>`;
           setTimeout(() => after.prepend(box), 600);
+          if (params.get("idlekick") === "once" && !sessionStorage.getItem("mock-kicked-once")) {
+            sessionStorage.setItem("mock-kicked-once", "1");
+            setTimeout(kick, 2000);
+          }
           if (!noAgain) {
             const btn = document.createElement("button");
             btn.textContent = "Race Again";
             btn.addEventListener("click", (e) => {
               if (!e.isTrusted) return void untrusted++;
+              if (window.__kicked) return; // no connection: nothing happens
               setTimeout(newRace, 300);
             });
             after.appendChild(btn);
@@ -427,6 +436,27 @@
           document.removeEventListener("keydown", check);
         });
         document.dispatchEvent(probe);
+
+        // A dropped connection: popup, logged out, nothing works until a reload.
+        window.__kicked = false;
+        function kick() {
+          if (window.__kicked) return;
+          window.__kicked = true;
+          sessionStorage.setItem("mock-kicks", String(Number(sessionStorage.getItem("mock-kicks") || 0) + 1));
+          comp.props.user.loggedIn = false;
+          if (race) race.dead = true;
+          document.body.insertAdjacentHTML(
+            "beforeend",
+            `<div class="modal" id="kicked"><h2>Disconnected</h2><p>You have been disconnected from the server due to inactivity. Please reload the page.</p></div>`,
+          );
+        }
+        window.__kick = kick;
+        if (params.get("idlekick") === "1") {
+          let lastBeat = Date.now();
+          setInterval(() => (lastBeat = Date.now()), 1000);
+          const watchdog = new Worker(URL.createObjectURL(new Blob(["setInterval(() => postMessage(0), 300)"], { type: "text/javascript" })));
+          watchdog.onmessage = () => Date.now() - lastBeat > 5000 && kick();
+        }
 
         if (params.get("afk") === "1") {
           let framePos = 0;

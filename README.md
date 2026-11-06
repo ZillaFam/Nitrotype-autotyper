@@ -30,8 +30,11 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
 - **Captcha pause**: if Nitro Type asks for a captcha, typing stops, the session **pauses** and you get a notification (even with the tab in view). The script never touches the captcha: you solve it. Once it has been gone for a few seconds, the session carries on by itself: it finishes the race you were in, or types the next one (yours or one it starts from the results screen). Press Stop to end the session instead. The always-on "protected by reCAPTCHA" badge is ignored.
 - **Safety stops**: a session ends (with a notification) instead of carrying on when:
   - the computer was asleep or shut down (a big jump in the clock mid-session, or Chrome restoring the tab afterwards: the session is not resumed);
-  - Nitro Type says you're logged out;
+  - you're still logged out right after a fresh page (see **Reconnects** below);
+  - Nitro Type drops the connection more than 4 times in 30 minutes;
   - you're disqualified twice in a row. After a single "Disqualified!" it notifies you and presses that popup's **Race Again** (never "Go To Your Garage").
+- **Reconnects**: if Nitro Type shows you as logged out, or shows a "disconnected" / "session expired" popup between races, the script reloads the race page to reconnect (your login lives in the browser; the script never touches it) and carries on, with a **"Reconnecting"** notification. Never in the middle of a race.
+- **Long breaks end with a fresh page**: after a break of 2 minutes or more, the next race starts from a freshly loaded race page instead of Race Again, since a page that sat idle that long may have lost its connection.
 - **Stop when the screen locks** (Panel tab): uses Chrome's Idle Detection, which asks for permission once, so a session doesn't keep running when you lock your computer and walk away.
 - **Themes**: Dark, Midnight, Light, or Auto (follows your system), plus six accent colours, in the Panel tab. The pop-ups and charts follow them too.
 - **Simple by default**: the panel shows just speed, accuracy, the Human touch, nitros, races to run, the mini track and Start, in three small groups. A badge next to the status says what's going on at a glance: Idle, Waiting, Typing, Break, Captcha or Done. Flip the **Advanced** switch at the bottom for every other setting plus the Stats and Panel tabs.
@@ -49,7 +52,7 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
 Start a session, then switch to another tab, or **minimise the window**. It keeps going:
 
 - The script's own typing runs on a Web Worker clock, which Chrome doesn't slow down in background tabs.
-- **Keep Nitro Type running when minimised** (on by default, Panel tab): in a minimised or hidden window Chrome stops screen refreshes and slows the page's timers to once a second, then once a minute. That freezes Nitro Type's own page, so your progress stops reaching the server and you get *disqualified due to inactivity*. While the window is hidden **and** a session is running, the script gives Nitro Type's page ~15 frames a second and runs its timers on the worker clock. While visible, or without a session, nothing changes.
+- **Keep Nitro Type running when minimised** (on by default, Panel tab): in a minimised or hidden window Chrome stops screen refreshes and slows the page's timers to once a second, then once a minute. That freezes Nitro Type's own page, so your progress stops reaching the server and you get *disqualified due to inactivity*. While the window is hidden **and** a session is on (including its breaks, captcha pauses and the gaps between races, so the connection never sits idle), the script gives Nitro Type's page ~15 frames a second and runs its timers on the worker clock. While visible, or without a session, nothing changes. If Chrome does put the tab to sleep, the panel says so when you come back.
 
 Watch the tab title for progress, and turn on notifications to hear about each race.
 

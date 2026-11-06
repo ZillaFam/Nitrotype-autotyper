@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.12.1
+// @version      3.13.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.12.1";
+  const VERSION = "3.13.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -219,7 +219,7 @@
   // visible, or with no session, everything passes straight through.
 
   const HIDDEN_FRAME_MS = 66;
-  let keepAliveWanted = false; // set by the engine: session armed + setting on
+  let keepAliveWanted = false; // set by the engine: a session is on (breaks and pauses too) + setting on
   const keepAliveActive = () => keepAliveWanted && document.hidden && timers.usingWorker;
 
   // requestAnimationFrame: the real one, plus a worker-timer backup while hidden.
@@ -830,7 +830,9 @@
   // every 1.5 s.
   const POPUP_SELECTOR =
     '.modal, [role="dialog"], [role="alertdialog"], [aria-modal="true"], [class*="modal" i], [class*="popup" i], [class*="captcha" i], [id*="captcha" i], [class*="challenge" i]';
-  let popupScan = { at: 0, captcha: false, stuck: false, dq: false };
+  let popupScan = { at: 0, captcha: false, stuck: false, dq: false, kicked: false };
+  // Nitro Type dropping the connection ("disconnected", "session expired", ...).
+  const KICKED_TEXT = /disconnected|lost (?:the |your )?connection|connection (?:was |has been )?(?:lost|closed|interrupted)|session (?:has )?expired|(?:log|sign) in again|been kicked|kicked from/i;
   function scanPopups() {
     const now = Date.now();
     if (now - popupScan.at < 1500) return popupScan;
@@ -843,20 +845,23 @@
     }
     let stuck = false;
     let dq = false;
+    let kicked = false;
     for (const el of document.querySelectorAll(POPUP_SELECTOR)) {
       if (el === panelHost || el.closest(".dash-copy")) continue;
       const text = el.textContent;
       const isCaptcha = !captcha && CAPTCHA_TEXT.test(text);
       const isStuck = !stuck && /currently in a race/i.test(text);
       const isDq = !dq && /disqualified/i.test(text) && !/currently in a race/i.test(text);
+      const isKicked = !kicked && !isDq && !isStuck && KICKED_TEXT.test(text) && !/disqualified|currently in a race/i.test(text);
       // Only now check it's actually showing (hidden templates don't count).
-      if ((isCaptcha || isStuck || isDq) && el.getClientRects().length) {
+      if ((isCaptcha || isStuck || isDq || isKicked) && el.getClientRects().length) {
         captcha ||= isCaptcha;
         stuck ||= isStuck;
         dq ||= isDq;
+        kicked ||= isKicked;
       }
     }
-    popupScan = { at: now, captcha, stuck, dq };
+    popupScan = { at: now, captcha, stuck, dq, kicked };
     return popupScan;
   }
   const captchaShowing = () => scanPopups().captcha;
@@ -1082,7 +1087,11 @@
       }
       if (!this.armed || this.running || !this.settings) return;
       if (captchaShowing()) return this.captchaStop();
-      if (loggedOut()) return this.stopFor("loggedOut");
+      if (scanPopups().kicked) return this.stopFor("kicked");
+      if (loggedOut()) {
+        popupScan.at = 0; // a fresh look: a dropped connection logs you out too
+        return this.stopFor(scanPopups().kicked ? "kicked" : "loggedOut");
+      }
       if (scanPopups().dq) return this.disqualified();
       const stuck = findStuckPopup();
       if (stuck !== undefined) return this.handleStuck(stuck);
@@ -1109,7 +1118,8 @@
     stopFor(kind) {
       this.runId++;
       this.running = false;
-      this.status(kind === "asleep" ? "Stopped: computer was asleep" : "Stopped: logged out");
+      // (Logged out / connection dropped: the session says what it's doing.)
+      if (kind === "asleep") this.status("Stopped: computer was asleep");
       toTop({ kind });
     },
 
@@ -1262,6 +1272,7 @@
         if (captchaShowing()) return this.captchaStop();
         if (scanPopups().dq) return this.disqualified();
         if (scanPopups().stuck) return this.stuckStop();
+        if (scanPopups().kicked) return this.stopFor("kicked");
         const seen = readRace();
         if (!stillHere(seen)) return this.finishRun(id, "Race closed");
         if (!sameRace(seen, startRace)) {
@@ -1318,6 +1329,7 @@
         if (captchaShowing()) return this.captchaStop();
         if (scanPopups().dq) return this.disqualified();
         if (scanPopups().stuck) return this.stuckStop();
+        if (scanPopups().kicked) return this.stopFor("kicked");
         const seen = readRace();
         if (!stillHere(seen)) return this.finishRun(id, "Race closed");
         if (!sameRace(seen, startRace)) {
@@ -1575,6 +1587,14 @@
       }
     },
 
+    // A fresh race page: to reconnect, or after a long break. Never while
+    // typing a race. (Only the top page reloads; frames come with it.)
+    refreshPage() {
+      if (!IS_TOP || this.running) return;
+      LOG("loading a fresh race page");
+      location.reload();
+    },
+
     reloadRace() {
       if (!this.onResultsScreen()) return;
       LOG("no new race after Race Again: reloading the race page");
@@ -1781,7 +1801,13 @@
       const race = readRace();
       if (race && isDone(race)) toTop({ kind: "needNext" });
     }
-    setKeepAlive(Boolean(engine.armed && engine.settings?.keepAlive));
+    // Keep Nitro Type's page running for the whole session, not just while
+    // typing: during breaks, captcha pauses and between races too. A page left
+    // idle in the background goes quiet, and Nitro Type drops the connection
+    // (logged out, kicked for inactivity).
+    if (typeof msg.live === "boolean") engine.live = msg.live;
+    setKeepAlive(Boolean((engine.armed || engine.live) && engine.settings?.keepAlive));
+    if (msg.cmd === "refresh") engine.refreshPage();
     if (msg.cmd === "next") engine.nextRace();
     if (msg.cmd === "leaveDq") engine.leaveDisqualified();
     if (msg.cmd === "reload") engine.reloadRace();
@@ -1928,7 +1954,11 @@
         this.state.breakUntil = 0;
         this.state.paused = "";
         this.save();
-        this.message = "Stopped: the browser was closed or the computer was off. Press Start to go again.";
+        // Chrome's Memory Saver puts background tabs to sleep, then reloads them
+        // when you come back.
+        this.message = document.wasDiscarded
+          ? "Stopped: Chrome put this tab to sleep to save memory. In Chrome's Settings → Performance, add nitrotype.com under \"Always keep these sites active\", then press Start."
+          : "Stopped: the browser was closed or the computer was off. Press Start to go again.";
         this.messageAt = Date.now();
       }
     },
@@ -1998,8 +2028,43 @@
     sync() {
       // Engines stay disarmed during a break or a captcha pause, even if a
       // race shows up. While paused, they watch for the captcha to go.
+      // "live": a session is on (keeps Nitro Type's page running throughout).
       const paused = this.paused();
-      toEngines({ settings: loadSettings(), armed: this.state.active && !this.onBreak() && !paused, watchCaptcha: paused });
+      toEngines({ settings: loadSettings(), armed: this.state.active && !this.onBreak() && !paused, watchCaptcha: paused, live: this.state.active });
+    },
+    // Logged out, or Nitro Type dropped the connection: usually a fresh page
+    // reconnects you (your login is in the browser; the script never touches
+    // it). Stops if it keeps happening.
+    reconnect(why) {
+      if (!this.state.active || this.reconnectTimer) return;
+      const now = Date.now();
+      const recent = (this.state.reconnects ?? []).filter((t) => now - t < 30 * 60000);
+      // Still logged out right after a fresh page: you really are logged out.
+      if (why === "loggedOut" && recent.some((t) => now - t < 2 * 60000)) {
+        this.stop("Stopped: you're logged out of Nitro Type. Log back in, then press Start.");
+        return;
+      }
+      if (recent.length >= 4) {
+        this.stop("Stopped: Nitro Type keeps dropping the connection");
+        return;
+      }
+      this.state.reconnects = [...recent, now];
+      this.save();
+      timers.clear(this.nextTimer);
+      timers.clear(this.fallbackTimer);
+      const message =
+        why === "loggedOut"
+          ? "Nitro Type shows you as logged out. Reloading the race page to reconnect (your login itself is untouched)…"
+          : "Nitro Type dropped the connection. Reloading the race page to reconnect…";
+      this.say(message);
+      notify("problem", message, { title: "Reconnecting" });
+      this.reconnectTimer = timers.set(() => {
+        this.reconnectTimer = 0;
+        if (!this.state.active) return;
+        this.state.beat = Date.now(); // a reload, not a shutdown
+        this.save();
+        toEngines({ cmd: "refresh" });
+      }, rand(3000, 6000));
     },
     pickBreakAfter(s) {
       if (!s.breakEvery) return 0;
@@ -2165,6 +2230,7 @@
       if (this.state.breakAfter && this.state.sinceBreak >= this.state.breakAfter) {
         const ms = rand(Math.min(s.breakLenMin, s.breakLenMax), Math.max(s.breakLenMin, s.breakLenMax)) * 60000;
         this.state.breakUntil = Date.now() + ms;
+        this.state.breakLen = ms;
         this.state.sinceBreak = 0;
         this.state.breakAfter = this.pickBreakAfter(s);
         this.save();
@@ -2212,9 +2278,18 @@
       this.nextTimer = timers.set(() => {
         if (!this.state.active) return;
         if (this.state.breakUntil) {
+          const long = (this.state.breakLen ?? 0) >= longBreakMs();
           this.state.breakUntil = 0;
+          this.state.beat = Date.now();
           this.save();
           this.sync();
+          if (long) {
+            // After minutes of sitting idle, Nitro Type's connection may be
+            // stale: start from a fresh race page instead of Race Again.
+            this.say("Back from the break: loading a fresh race page…");
+            toEngines({ cmd: "refresh" });
+            return;
+          }
           this.say("Back from the break…");
         }
         toEngines({ cmd: "next" });
@@ -2346,6 +2421,8 @@
   const CAPTCHA_TEXT_BODY = "Nitro Type is asking for a captcha. The session is paused: solve it yourself, and it carries on by itself.";
   const CAPTCHA_PAUSED = "Paused: solve the captcha and I'll carry on by myself";
   const CAPTCHA_GONE_MS = 2500; // the captcha has to stay gone this long
+  // Breaks at least this long end with a fresh race page, not Race Again.
+  const longBreakMs = () => window.__ntAutotyperLongBreakMs ?? 2 * 60000;
   const alarm = {
     on: false,
     count: 0,
@@ -2551,7 +2628,8 @@
         session.stuck(msg.waitSec ?? 25);
         break;
       case "loggedOut":
-        if (session.state.active) session.stop("Stopped: you're logged out of Nitro Type");
+      case "kicked":
+        session.reconnect(msg.kind);
         break;
       case "asleep":
         if (session.state.active) session.stop("Stopped: your computer was asleep");
@@ -3207,7 +3285,7 @@
               <div class="row"><input type="range" class="opacity" min="20" max="100"></div>
             </div>
             <div class="hint">Drag the header to move the panel, drag the bottom-right corner to resize it, ⊟ for compact mode, ▾ to collapse it.</div>
-            <label class="check"><input type="checkbox" data-k="keepAlive"><span>Keep Nitro Type running when minimised<small>During a session, Nitro Type's page keeps updating even when its window is minimised or hidden, so it doesn't look idle.</small></span></label>
+            <label class="check"><input type="checkbox" data-k="keepAlive"><span>Keep Nitro Type running when minimised<small>For the whole session (breaks too), Nitro Type's page keeps updating even when its window is minimised or hidden, so it doesn't look idle and the connection stays up. For long sessions in Chrome, also add nitrotype.com under Settings → Performance → "Always keep these sites active", so Chrome doesn't put the tab to sleep.</small></span></label>
             <label class="check"><input type="checkbox" data-k="miniMap"><span>Mini map instead of the race track<small>A light five-lane map of every racer, in place of Nitro Type's track.</small></span></label>
             <label class="check"><input type="checkbox" data-k="lite"><span>Low-FPS mode<small>For slow computers: no animations, no live standings, and the panel updates once a second.</small></span></label>
             <button class="btn2 reset-panel">Reset position and size</button>
