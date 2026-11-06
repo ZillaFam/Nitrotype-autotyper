@@ -3497,7 +3497,8 @@
       focusEl.hidden = !open;
       toEngines({ focus: open }); // so Esc closes it instead of stopping
       if (!open && document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
-      panel.render();
+      if (open) renderNow(); // filled in at once, not a frame later
+      else panel.render();
       focusRace(); // keys go to the race, not our buttons
     }
     panel.closeFocus = () => setFocusView(false);
