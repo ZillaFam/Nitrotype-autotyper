@@ -135,8 +135,10 @@ try {
         }
       }
     }
-    // The first race may start before the script hears the countdown; the second can't.
-    check(`${name}: no keys before GO`, results[1].earlyKeys === 0, `${results[1].earlyKeys} keys before GO`);
+    // The first race may start before the script hears the countdown; the
+    // second can't. (The mock's early-key count adds up over the page.)
+    const early2 = results[1].earlyKeys - results[0].earlyKeys;
+    check(`${name}: no keys before GO`, early2 === 0, `${early2} keys before GO in race 2`);
     check(`${name}: first key a human reaction time after GO`, results[1].firstKeyMs >= 180 && results[1].firstKeyMs <= 900, `${results[1].firstKeyMs} ms`);
     const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
     check(`${name}: capitals slower than lowercase`, avg(caps) > 1.15 * avg(lower), `${avg(caps).toFixed(0)} vs ${avg(lower).toFixed(0)} ms`);
