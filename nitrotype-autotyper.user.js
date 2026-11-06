@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.13.1
+// @version      3.13.2
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.13.1";
+  const VERSION = "3.13.2";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -2362,6 +2362,10 @@
    * hide its own). Returns the system pop-up's outcome via onResult.
    */
   let noteSeq = 0;
+  // What happened to the last system pop-up: "shown", "not allowed", "error…",
+  // or "unconfirmed" (Chrome never said). The panel warns when they're not
+  // getting through, instead of only the sound playing.
+  let noteHealth = { result: "", at: 0 };
   function deliver(level, title, body, tag, onResult) {
     if (level === "low" || level === "high") alarm.chime();
     if (level === "urgent") alarm.beep();
@@ -2369,7 +2373,16 @@
     panel.toast?.(level, title, body);
     // A fresh tag every time: reusing one makes the system quietly replace
     // the previous notification instead of popping up a new one.
-    showNotification(title, body, `${tag}-${Date.now()}-${++noteSeq}`, level, onResult);
+    let reported = false;
+    const report = (result) => {
+      if (reported) return;
+      reported = true;
+      noteHealth = { result, at: Date.now() };
+      panel.noteHealthChanged?.();
+      onResult?.(result);
+    };
+    timers.set(() => report("unconfirmed"), 8000);
+    showNotification(title, body, `${tag}-${Date.now()}-${++noteSeq}`, level, report);
   }
 
   // Notifications are kept referenced until Chrome reports on them, so none
@@ -2381,6 +2394,7 @@
       onResult?.("not allowed");
       return false;
     }
+    // (onResult reports "shown" / "error" below)
     try {
       const options = { body, tag };
       if (level === "urgent") {
@@ -3115,7 +3129,19 @@
     .box.alarm { border-color: var(--bad); box-shadow: 0 0 0 3px rgba(255, 92, 108, .45), 0 12px 40px rgba(0, 0, 0, .45); animation: alarm 1s steps(2, jump-none) infinite; }
     .box.alarm .status { color: #ffd0d5; font-weight: 700; }
     @keyframes alarm { 50% { box-shadow: 0 0 0 3px rgba(255, 92, 108, .1), 0 12px 40px rgba(0, 0, 0, .45); } }
-    .notify-status { color: var(--sub); font-size: 11px; }
+    .notify-status, .notify-last { color: var(--sub); font-size: 11px; }
+    /* pop-ups aren't getting through: say so, with a fix */
+    .note-warn {
+      display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; margin-top: 8px;
+      padding: 7px 8px 7px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.35;
+      color: var(--text); background: color-mix(in srgb, var(--warn) 14%, var(--bg2)); border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--bg2));
+    }
+    .note-warn[hidden] { display: none; }
+    .note-warn button { all: unset; cursor: pointer; font-weight: 700; padding: 3px 8px; border-radius: 6px; }
+    .note-warn .nw-fix { background: var(--accent); color: var(--on-accent); }
+    .note-warn .nw-fix[hidden] { display: none; }
+    .note-warn .nw-x { color: var(--sub); padding: 3px 4px; }
+    .note-warn .nw-x:hover { color: var(--text); }
     .sep { border: 0; border-top: 1px solid var(--line); margin: 0; }
     .breaks { display: grid; grid-template-columns: auto 52px auto; align-items: center; gap: 6px; color: var(--sub); font-size: 12px; }
     .breaks input[type=number] { width: 52px; }
@@ -3159,6 +3185,7 @@
       <div class="main">
         <div class="live">
           <div class="status-row"><span class="badge idle">Idle</span><div class="status">Idle</div></div>
+          <div class="note-warn" hidden><span class="nw-text"></span><button class="nw-fix" hidden>Allow</button><button class="nw-x" title="Hide this" aria-label="Hide this">✕</button></div>
           <div class="track"><div class="trail"></div><div class="finish"></div><div class="rivals"></div><div class="car"><svg viewBox="0 0 30 14" aria-hidden="true"><path d="M2.5 10.5V9.4Q3 8 4.4 7.6L6.2 4.8Q7.1 3.5 8.7 3.5H17Q18.8 3.5 20.1 4.8L22.6 7.3H25.6Q27.8 7.6 28 9.6V10.5Z" fill="currentColor"/><path d="M9.2 5H13V7.3H7.8ZM14.4 5H17.2Q18 5 18.6 5.6L20.1 7.3H14.4Z" fill="#0f1426" opacity=".55"/><circle cx="8.3" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/><circle cx="22" cy="11" r="2.4" fill="#0f1426" stroke="currentColor" stroke-width="1.2"/></svg></div></div>
           <div class="people live-people"></div>
           <div class="result-card" hidden></div>
@@ -3314,7 +3341,7 @@
                 .join("")}
             </div>
             <div class="hint sound-state"></div>
-            <div class="notify-test"><button class="btn2 test-notify">Send a test notification</button><button class="btn2 test-alarm">Test the captcha alert</button><small class="notify-status"></small></div>
+            <div class="notify-test"><button class="btn2 test-notify">Send a test notification</button><button class="btn2 test-alarm">Test the captcha alert</button><small class="notify-status"></small><small class="notify-last"></small></div>
             <label class="check"><input type="checkbox" data-k="stopOnLock"><span>Stop when my screen locks<small class="lock-hint">Chrome asks for permission once.</small></span></label>
             <label class="check"><input type="checkbox" data-k="debug"><span>Debug view<small>Shows what the script sees on the page. Copy it and send it over if something breaks.</small></span></label>
             <button class="btn2 copy-debug">Copy debug info</button>
@@ -3626,6 +3653,79 @@
       $(".test-alarm").blur();
     });
     // Where to look when Chrome showed it but nothing appeared.
+    // ---- are pop-ups getting through? ----------------------------------------
+    // Chrome can switch a site's notifications off by itself (e.g. a site that
+    // sends a lot of them), and then only the sound is left.
+    const popupLevels = () => Object.values(NOTIFY).some((k) => ["normal", "high", "urgent"].includes(settings[k.level]));
+    function noteProblem() {
+      if (!settings.notify || !popupLevels() || !("Notification" in window)) return null;
+      const perm = Notification.permission;
+      if (perm === "denied") {
+        return {
+          key: "denied",
+          text: "Desktop pop-ups are blocked: Chrome has notifications for nitrotype.com turned off (it can do that by itself for sites that send a lot). To fix: click the icon left of the address bar → Notifications → Allow, then reload.",
+          fix: false,
+        };
+      }
+      if (perm !== "granted") return { key: "default", text: "Desktop pop-ups are off: Chrome reset the notification permission for nitrotype.com. Press Allow, then pick Allow in Chrome's prompt.", fix: true };
+      if (noteHealth.result.startsWith("error")) {
+        return { key: `error${noteHealth.at}`, text: `Chrome couldn't show the last pop-up (${noteHealth.result}). Check chrome://settings/content/notifications: nitrotype.com under "Allowed", and "Sites can ask to send notifications" on.`, fix: false };
+      }
+      return null;
+    }
+    let warnDismissed = "";
+    let warnToasted = "";
+    function renderNoteWarn() {
+      const problem = noteProblem();
+      const bar = $(".note-warn");
+      bar.hidden = !problem || problem.key === warnDismissed;
+      if (!problem) return;
+      setText($(".nw-text"), problem.text);
+      $(".nw-fix").hidden = !problem.fix;
+    }
+    panel.noteHealthChanged = () => {
+      const problem = noteProblem();
+      // Once per problem: an on-page pop-up too (the bar may be scrolled away).
+      if (problem && problem.key !== warnToasted) {
+        warnToasted = problem.key;
+        panel.toast?.("high", "Desktop pop-ups aren't getting through", problem.text);
+      }
+      showLastNote();
+      panel.render();
+    };
+    function showLastNote() {
+      const { result, at } = noteHealth;
+      if (!at) return setText($(".notify-last"), "");
+      const when = new Date(at).toLocaleTimeString();
+      setText(
+        $(".notify-last"),
+        result === "shown"
+          ? `Last pop-up (${when}): Chrome says it showed it. Not seeing them? ${systemHelp()}`
+          : result === "unconfirmed"
+            ? `Last pop-up (${when}): Chrome never confirmed showing it. ${systemHelp()}`
+            : `Last pop-up (${when}): ${result === "not allowed" ? "not allowed by Chrome" : result}.`,
+      );
+    }
+    $(".nw-fix").addEventListener("click", async () => {
+      if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission().catch(() => {});
+      showNotifyStatus();
+      panel.render();
+    });
+    $(".nw-x").addEventListener("click", () => {
+      warnDismissed = noteProblem()?.key ?? "";
+      renderNoteWarn(); // at once
+    });
+    // Chrome changing the permission (by itself, or you in site settings).
+    navigator.permissions
+      ?.query({ name: "notifications" })
+      .then((st) => {
+        st.onchange = () => {
+          showNotifyStatus();
+          panel.noteHealthChanged();
+        };
+      })
+      .catch(() => {});
+
     function systemHelp() {
       const ua = navigator.userAgent;
       if (/Windows/.test(ua)) {
@@ -3788,6 +3888,7 @@
       const badge = $(".badge");
       if (badge.className !== `badge ${badgeClass}`) badge.className = `badge ${badgeClass}`;
       setText(badge, badgeText);
+      renderNoteWarn();
       const soundState = $(".sound-state");
       if (soundState) {
         setText(

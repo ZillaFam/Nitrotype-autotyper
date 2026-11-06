@@ -719,6 +719,75 @@ try {
     await context.close();
   });
 
+  for (const [perm, expect, fix] of [
+    ["default", "Desktop pop-ups are off: Chrome reset", true],
+    ["denied", "Desktop pop-ups are blocked", false],
+  ]) {
+    await test(`pop-ups not getting through: permission ${perm}`, async (name) => {
+      const { context, page } = await open("", { ...BASE, notify: true, levelSession: "high" }, { advanced: false }, `(() => {
+        window.__asked = 0;
+        window.Notification = class {
+          static permission = ${JSON.stringify(perm)};
+          static requestPermission = async () => { window.__asked++; window.Notification.permission = "granted"; return "granted"; };
+          constructor() {}
+        };
+      })()`);
+      await page.waitForTimeout(500);
+      const text = await page.locator(".nw-text").textContent();
+      check(`${name}: a warning bar in the panel (simple mode too)`, (await page.locator(".note-warn").isVisible()) && text.startsWith(expect), text);
+      check(`${name}: ${fix ? "an Allow button" : "steps to unblock (no button)"}`, (await page.locator(".nw-fix").isVisible()) === fix);
+      if (fix) {
+        await page.locator(".nw-fix").click();
+        await page.waitForTimeout(300);
+        check(`${name}: Allow asks Chrome, then the bar goes`, (await page.evaluate(() => window.__asked)) === 1 && !(await page.locator(".note-warn").isVisible()));
+      } else {
+        await page.locator(".nw-x").click();
+        check(`${name}: can be hidden`, !(await page.locator(".note-warn").isVisible()));
+      }
+      await context.close();
+    });
+  }
+
+  await test("pop-ups not getting through: Chrome reports an error", async (name) => {
+    const { context, page } = await open("", { ...BASE, notify: true, levelLevel: "normal" }, { advanced: true, tab: "panel" }, () => {
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor() {
+          setTimeout(() => this.onerror?.(new Event("error")), 30);
+        }
+        close() {}
+      };
+    });
+    check(`${name}: no bar while all is well`, !(await page.locator(".note-warn").isVisible()));
+    await page.locator('.try[data-try="level"]').click();
+    await page.waitForTimeout(600);
+    const text = await page.locator(".nw-text").textContent();
+    check(`${name}: warning bar`, (await page.locator(".note-warn").isVisible()) && text.startsWith("Chrome couldn't show the last pop-up"), text);
+    const toasts = await page.locator(".toast").allTextContents();
+    check(`${name}: and an on-page pop-up`, toasts.some((t) => t.startsWith("Desktop pop-ups aren't getting through")), toasts.join(" | "));
+    check(`${name}: last pop-up line`, (await page.locator(".notify-last").textContent()).includes("error"), await page.locator(".notify-last").textContent());
+    await context.close();
+  });
+
+  await test("pop-ups getting through: no warning, last pop-up noted", async (name) => {
+    const { context, page } = await open("", { ...BASE, notify: true, levelLevel: "normal" }, { advanced: true, tab: "panel" }, () => {
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor() {
+          setTimeout(() => this.onshow?.(), 30);
+        }
+        close() {}
+      };
+    });
+    await page.locator('.try[data-try="level"]').click();
+    await page.waitForTimeout(600);
+    check(`${name}: no warning bar`, !(await page.locator(".note-warn").isVisible()));
+    check(`${name}: says Chrome showed it`, (await page.locator(".notify-last").textContent()).includes("Chrome says it showed it"), await page.locator(".notify-last").textContent());
+    await context.close();
+  });
+
   await test("captcha alert test button", async (name) => {
     const { context, page } = await open("", { ...BASE, notify: true }, null, () => {
       window.__notes = [];
