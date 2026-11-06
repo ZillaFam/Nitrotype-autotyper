@@ -867,11 +867,44 @@ try {
     await page.waitForTimeout(2500);
     check(`${name}: says so`, (await status(page)) === "Disqualified. Next race soon…", await status(page));
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: notification`, notes.includes("⚠ NT Autotyper · racer_me: Disqualified for inactivity. Going on to the next race."), JSON.stringify(notes));
+    check(`${name}: notification`, notes.includes("Disqualified · racer_me: Disqualified for inactivity. Going on to the next race."), JSON.stringify(notes));
     const [r] = await waitForResults(page, 1, 60000);
     check(`${name}: pressed Race Again (not the garage) and raced`, r.correct > 100 && (await page.evaluate(() => window.__garageClicks)) === 0);
     await page.waitForTimeout(1500);
     check(`${name}: the disqualified race didn't count`, (await status(page)) === "Done: 1 race", await status(page));
+    await context.close();
+  });
+
+  await test("currently in a race mid-session: waits, notifies, carries on", async (name) => {
+    const { context, page } = await open("?inrace=next&countdown=300", { ...BASE, wpmMin: 180, wpmMax: 180, races: 2, notify: true }, null, () => {
+      window.__notes = [];
+      window.__garageClicks = 0;
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+        }
+      };
+    });
+    await page.locator(".go").click();
+    await page.waitForFunction(() => document.getElementById("inrace"), null, { timeout: 60000 });
+    await page.waitForTimeout(3000);
+    const said = await status(page);
+    check(`${name}: says what's going on (not a failure)`, said.startsWith("Currently in a race: Nitro Type still has you in your last race. Pressing Try Again in"), said);
+    check(`${name}: session still on`, (await page.locator(".go").textContent()) === "Stop");
+    let notes = await page.evaluate(() => window.__notes);
+    check(`${name}: notification`, notes.some((n) => n.startsWith("Currently in a race · racer_me: Nitro Type still has you in your last race.")), JSON.stringify(notes));
+    // Waits it out, presses Try Again, then Race Again on the disqualified popup.
+    const [, r] = await waitForResults(page, 2, 90000);
+    check(`${name}: pressed Try Again once`, (await page.evaluate(() => window.__tryAgainClicks)) === 1);
+    check(`${name}: then raced again`, r.correct > 100 && (await page.evaluate(() => window.__garageClicks)) === 0);
+    notes = await page.evaluate(() => window.__notes);
+    check(`${name}: disqualified from the old race: its own notification`, notes.some((n) => n.startsWith("Disqualified · racer_me: From the race you were still in")), JSON.stringify(notes));
+    check(`${name}: never 'failed' or stopped`, !notes.some((n) => /didn't start|Stopped|twice/.test(n)), JSON.stringify(notes));
+    check(`${name}: one 'currently in a race' notification`, notes.filter((n) => n.startsWith("Currently in a race")).length === 1);
+    await page.waitForTimeout(1500);
+    check(`${name}: finishes the session`, (await status(page)) === "Done: 2 races", await status(page));
     await context.close();
   });
 
@@ -1039,7 +1072,7 @@ try {
     await page.locator(".go").click();
     await page.waitForTimeout(1500);
     const msg = await status(page);
-    check(`${name}: explains it's waiting`, /still in your last race\. Trying again in \d+s/.test(msg), msg);
+    check(`${name}: explains it's waiting`, /still has you in your last race\. Pressing Try Again in \d+s/.test(msg), msg);
     await page.waitForTimeout(5000);
     check(`${name}: doesn't click too soon, or "Go To Your Garage"`, (await page.locator("#inrace").count()) === 1 && (await page.evaluate(() => window.__garageClicks)) === 0);
     const [r] = await waitForResults(page, 1, 60000);

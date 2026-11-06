@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.12.0
+// @version      3.12.1
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.12.0";
+  const VERSION = "3.12.1";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -1158,11 +1158,26 @@
       toTop({ kind: "captcha" });
     },
 
+    // "Currently in a Race" showed up during a race (or while waiting for
+    // GO): that race isn't happening. Stop typing, then wait it out. Not a
+    // failure: no "Race didn't start".
+    stuckStop() {
+      this.runId++;
+      this.running = false;
+      const race = readRace();
+      if (race) {
+        this.lastRace = race;
+        this.lastRaceFinished = true; // over: the next race is a new one
+      }
+      this.status("Currently in a race");
+      this.handleStuck(findStuckPopup());
+    },
+
     // Wait out the "Currently in a Race" popup, then press its Try Again.
     handleStuck(tryAgain) {
       if (this.stuckTimer) return;
       const wait = rand(20000, 30000);
-      toTop({ kind: "say", message: `Nitro Type says you're still in your last race. Trying again in ${Math.round(wait / 1000)}s…` });
+      toTop({ kind: "stuck", waitSec: Math.round(wait / 1000) });
       toTop({ kind: "raceSeen" }); // nothing to reload: just wait
       this.stuckTimer = timers.set(() => {
         this.stuckTimer = 0;
@@ -1170,6 +1185,8 @@
         if (button) {
           LOG("clicking Try Again");
           clickElement(button);
+          popupScan.at = 0; // look again next time, the popup is going away
+          toTop({ kind: "say", message: "Pressed Try Again…" });
         } else if (button === null && tryAgain === null) {
           toTop({ kind: "say", message: "Nitro Type says you're still in your last race. Waiting…" });
         }
@@ -1244,6 +1261,7 @@
         probeWall = Date.now();
         if (captchaShowing()) return this.captchaStop();
         if (scanPopups().dq) return this.disqualified();
+        if (scanPopups().stuck) return this.stuckStop();
         const seen = readRace();
         if (!stillHere(seen)) return this.finishRun(id, "Race closed");
         if (!sameRace(seen, startRace)) {
@@ -1299,6 +1317,7 @@
         lastLoopWall = Date.now();
         if (captchaShowing()) return this.captchaStop();
         if (scanPopups().dq) return this.disqualified();
+        if (scanPopups().stuck) return this.stuckStop();
         const seen = readRace();
         if (!stillHere(seen)) return this.finishRun(id, "Race closed");
         if (!sameRace(seen, startRace)) {
@@ -1926,14 +1945,43 @@
       this.state.beat = now;
       this.save();
     },
+    // Nitro Type's "Currently in a Race": you're still in an earlier race
+    // (left before it ended). It disqualifies you from that one, then lets
+    // you race again. The engine waits, then presses Try Again.
+    stuck(waitSec) {
+      if (!this.state.active) return;
+      const now = Date.now();
+      this.stuckAt = now;
+      timers.clear(this.fallbackTimer); // never reload now: that makes it worse
+      this.say(`Currently in a race: Nitro Type still has you in your last race. Pressing Try Again in ${waitSec}s…`);
+      // One notification per episode, not one per Try Again.
+      if (now - (this.stuckToldAt ?? 0) > 3 * 60000) {
+        this.stuckToldAt = now;
+        notify(
+          "problem",
+          `Nitro Type still has you in your last race. That's expected after leaving a race early; nothing failed. The script waits it out, presses Try Again in about ${waitSec}s, and carries on.`,
+          { title: "Currently in a race" },
+        );
+      }
+    },
     disqualified() {
       if (!this.state.active) return;
+      // Right after "Currently in a Race": that's the old race ending. Expected,
+      // so it doesn't count toward "disqualified twice in a row".
+      if (Date.now() - (this.stuckAt ?? 0) < 5 * 60000) {
+        this.stuckAt = 0;
+        notify("problem", "From the race you were still in (after \"Currently in a race\"). Expected; going on to the next race.", { title: "Disqualified" });
+        this.say("Disqualified from the old race. Next race soon…");
+        timers.clear(this.nextTimer);
+        this.nextTimer = timers.set(() => this.state.active && toEngines({ cmd: "leaveDq" }), rand(3000, 6000));
+        return;
+      }
       this.dqInARow = (this.dqInARow ?? 0) + 1;
       if (this.dqInARow >= 2) {
         this.stop("Stopped: disqualified twice in a row");
         return;
       }
-      notify("problem", "Disqualified for inactivity. Going on to the next race.");
+      notify("problem", "Disqualified for inactivity. Going on to the next race.", { title: "Disqualified" });
       this.say("Disqualified. Next race soon…");
       timers.clear(this.nextTimer);
       this.nextTimer = timers.set(() => this.state.active && toEngines({ cmd: "leaveDq" }), rand(3000, 6000));
@@ -2221,14 +2269,15 @@
   //   5 captcha            stays on screen, re-alerts, plus an alarm in the page
 
   // Every time, whether or not you're looking at the tab.
-  function notify(type, message) {
+  function notify(type, message, { title: ownTitle } = {}) {
     const s = loadSettings();
     const kind = NOTIFY[type];
     if (!kind || !s.notify) return;
     const level = s[kind.level];
     if (level === "off") return;
     // "Race finished · yourname"
-    const title = session.player ? `${kind.title} · ${session.player}` : kind.title;
+    const base = ownTitle ?? kind.title;
+    const title = session.player ? `${base} · ${session.player}` : base;
     deliver(level, title, message, `nt-autotyper-${type}`);
   }
 
@@ -2497,6 +2546,9 @@
         break;
       case "disqualified":
         session.disqualified();
+        break;
+      case "stuck":
+        session.stuck(msg.waitSec ?? 25);
         break;
       case "loggedOut":
         if (session.state.active) session.stop("Stopped: you're logged out of Nitro Type");
@@ -3165,7 +3217,7 @@
               <div class="levels-hint">Low: chime · Normal: pop-up · High: chime + pop-up · Urgent: alarm + pop-up that stays</div>
               ${[
                 ["levelCaptcha", "captcha", "Captcha", "Session pauses, carries on once it's solved. Urgent repeats every minute."],
-                ["levelProblem", "problem", "Problems", "Disqualified, logged out, asleep, stuck"],
+                ["levelProblem", "problem", "Problems", "Currently in a race, disqualified, logged out, asleep, stuck"],
                 ["levelSession", "session", "Session done", "Races, WPM, wins, money, XP"],
                 ["levelMilestone", "milestone", "Milestones", "Personal best, win streaks"],
                 ["levelLevel", "level", "Level ups", ""],
