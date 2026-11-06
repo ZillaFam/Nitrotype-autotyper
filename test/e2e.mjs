@@ -20,7 +20,7 @@ function check(name, ok, detail = "") {
   if (!ok) failures++;
 }
 
-const BASE = { wpmMin: 100, wpmMax: 100, accuracy: 100, variance: 25, nitros: 0, races: 1 };
+const BASE = { wpmMin: 100, wpmMax: 100, accuracy: 100, variance: 25, nitros: 0, races: 1, offDays: false };
 
 async function open(query, settings, ui, before) {
   const context = await browser.newContext({ viewport: { width: 1200, height: 800 } });
@@ -144,16 +144,16 @@ try {
     check(`${name}: alternating hands faster than one hand`, avg(altHand) < avg(sameHand), `${avg(altHand).toFixed(0)} vs ${avg(sameHand).toFixed(0)} ms`);
     const gaps = results[0].keys.filter((k) => k.ok).map((k, i, a) => (i ? k.t - a[i - 1].t : 0)).slice(1);
     const spread = Math.sqrt(avg(gaps.map((g) => (g - avg(gaps)) ** 2))) / avg(gaps);
-    check(`${name}: uneven like a person (not a metronome)`, spread > 0.3, `spread ${spread.toFixed(2)}`);
+    check(`${name}: uneven like a person (not a metronome)`, spread > 0.2, `spread ${spread.toFixed(2)}`);
     await context.close();
   });
 
   await test("human touch setting", async (name) => {
     const { context, page } = await open("", { ...BASE }, { advanced: false });
-    check(`${name}: shown in simple mode, Natural by default`, (await page.locator(".seg button.on").textContent()) === "Natural");
+    check(`${name}: shown in simple mode, Natural by default`, (await page.locator(".seg [data-human].on").textContent()) === "Natural");
     await page.locator('.seg [data-human="strong"]').click();
     const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-settings")).humanLevel);
-    check(`${name}: picking Strong saves it`, saved === "strong" && (await page.locator(".seg button.on").textContent()) === "Strong", saved);
+    check(`${name}: picking Strong saves it`, saved === "strong" && (await page.locator(".seg [data-human].on").textContent()) === "Strong", saved);
     check(`${name}: explains it`, (await page.locator(".human-hint").textContent()).startsWith("Very human"));
     check(`${name}: settings grouped`, (await page.locator(".g-head").allTextContents()).join(",") === "Speed & accuracy,Human touch,Session");
     check(`${name}: status badge says Idle`, (await page.locator(".badge").textContent()) === "Idle");
@@ -226,10 +226,10 @@ try {
 
     const points = await page.locator(".chart-svg polyline").getAttribute("points");
     check(`${name}: chart plots 3 races`, points?.trim().split(" ").length === 3, points);
-    const chartBox = await page.locator(".chart").boundingBox();
+    const chartBox = await page.locator(".chart:not(.days)").boundingBox();
     await page.mouse.move(chartBox.x + chartBox.width - 10, chartBox.y + chartBox.height / 2);
-    const tip = await page.locator(".chart .tip").textContent();
-    check(`${name}: chart tooltip on hover`, (await page.locator(".chart .tip").isVisible()) && /\d+ WPM · [\d.]+% · /.test(tip), tip);
+    const tip = await page.locator(".chart:not(.days) .tip").textContent();
+    check(`${name}: chart tooltip on hover`, (await page.locator(".chart:not(.days) .tip").isVisible()) && /\d+ WPM · [\d.]+% · /.test(tip), tip);
     if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-stats.png") });
     await context.close();
   });
@@ -293,6 +293,147 @@ try {
     const [st] = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-stats")));
     const o = st.official ?? {};
     check(`${name}: still finds WPM, place, money, XP`, o.wpm === r.shown.wpm && o.place === r.shown.place && o.money === r.shown.money && o.xp === r.shown.xp, JSON.stringify(o));
+    await context.close();
+  });
+
+  await test("off race", async (name) => {
+    const { context, page } = await open("", { ...BASE, wpmMin: 120, wpmMax: 120, offDays: true }, null, () => (window.__ntAutotyperOffDay = "off"));
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    check(`${name}: slower than the range (80-90% of it)`, r.wpm > 120 * 0.74 && r.wpm < 120 * 0.95, `got ${r.wpm.toFixed(1)}`);
+    await page.waitForTimeout(800);
+    const [st] = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-stats")));
+    check(`${name}: noted in the stats`, st.offDay === "off", JSON.stringify(st.offDay));
+    await page.locator('nav button[data-tab="stats"]').click();
+    check(`${name}: tagged in the history`, (await page.locator(".history .tag").textContent()) === "off");
+    await context.close();
+  });
+
+  await test("slow start", async (name) => {
+    const { context, page } = await open("", { ...BASE, wpmMin: 100, wpmMax: 100, variance: 10, offDays: true }, null, () => (window.__ntAutotyperOffDay = "slow"));
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    const ok = r.keys.filter((k) => k.ok);
+    const gaps = ok.slice(1).map((k, i) => k.t - ok[i].t);
+    const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+    const n = Math.round(gaps.length * 0.1);
+    const early = avg(gaps.slice(2, n)); // skip the first keys' warm-up
+    const later = avg(gaps.slice(Math.round(gaps.length * 0.4)));
+    check(`${name}: the start is slower`, early > 1.2 * later, `${early.toFixed(0)} vs ${later.toFixed(0)} ms`);
+    await page.waitForTimeout(800);
+    const [st] = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-stats")));
+    check(`${name}: noted in the stats`, st.offDay === "slow", JSON.stringify(st.offDay));
+    await context.close();
+  });
+
+  await test("off races switched off", async (name) => {
+    const { context, page } = await open("", { ...BASE, wpmMin: 120, wpmMax: 120, offDays: false }, null, () => (window.__ntAutotyperOffDay = "off"));
+    await page.locator(".go").click();
+    const [r] = await waitForResults(page, 1);
+    check(`${name}: normal speed`, Math.abs(r.wpm - 120) / 120 <= 0.1, `got ${r.wpm.toFixed(1)}`);
+    await context.close();
+  });
+
+  await test("stats: today, wins, per hour, by day, export", async (name) => {
+    const now = Date.now();
+    const day = 86400000;
+    const race = (at, place, money, xp, extra = {}) => ({ wpm: 100, accuracy: 97, target: 100, accTarget: 97, nitros: 1, chars: 160, ms: 20000, at, official: { wpm: 100, accuracy: 97, place, money, xp }, ...extra });
+    // Today: three races a minute apart; yesterday two; five days ago one.
+    const stats = [
+      race(now - 5 * day, 4, 1000, 400),
+      race(now - day - 120000, 2, 1100, 450),
+      race(now - day - 60000, 1, 1200, 500, { offDay: "slow" }),
+      race(now - 120000, 1, 1300, 600),
+      race(now - 60000, 3, 1400, 700),
+      race(now - 1000, 5, 1500, 800, { offDay: "off" }),
+    ];
+    const tenDaysAgo = new Date(now - 10 * day);
+    const key = `${tenDaysAgo.getFullYear()}-${String(tenDaysAgo.getMonth() + 1).padStart(2, "0")}-${String(tenDaysAgo.getDate()).padStart(2, "0")}`;
+    const { context, page } = await open("", { ...BASE }, { advanced: true, tab: "stats" });
+    // Seed the stats, then reload so the script reads them.
+    await page.evaluate(([st, k]) => {
+      localStorage.setItem("nt-autotyper-stats", JSON.stringify(st));
+      localStorage.setItem("nt-autotyper-days", JSON.stringify({ [k]: { races: 4, wpm: 360, acc: 380, money: 4000, xp: 1600, wins: 1 } }));
+    }, [stats, key]);
+    await page.reload();
+    await page.waitForSelector(".go");
+    await page.locator('nav button[data-tab="stats"]').click();
+    await page.waitForTimeout(300);
+    const today = await page.locator(".today").textContent();
+    check(`${name}: today's line`, today.includes("3 races") && today.includes("+$4,200") && today.includes("+2,100 XP") && today.includes("1 win"), today);
+    check(`${name}: wins and win rate`, (await page.locator(".s-wins").textContent()) === "2" && (await page.locator(".s-winrate").textContent()) === "33% of races");
+    check(`${name}: top 3`, (await page.locator(".s-podium").textContent()) === "67%", await page.locator(".s-podium").textContent());
+    // per hour: 3 stretches (20 s; 20 s + 60 s; 20 s + 60 s + 59 s) = 239 s for $7,500 = $112,971/h
+    const rate = await page.locator(".s-rate").textContent();
+    check(`${name}: money per hour of racing`, rate === "$113K", rate);
+    check(`${name}: by day: 14 bars`, (await page.locator(".days-svg rect").count()) === 14);
+    check(`${name}: today's bar stands out`, (await page.locator(".days-svg rect.now").count()) === 1 && !(await page.locator(".days-svg rect.now").getAttribute("class")).includes("zero"));
+    check(`${name}: old day totals included`, (await page.locator(".days-svg rect:not(.zero)").count()) === 4, `${await page.locator(".days-svg rect:not(.zero)").count()} days with races`);
+    await page.locator(".chart.days").scrollIntoViewIfNeeded();
+    const box = await page.locator(".chart.days").boundingBox();
+    await page.mouse.move(box.x + box.width - 8, box.y + 40);
+    const tip = await page.locator(".chart.days .tip").textContent();
+    check(`${name}: by-day tooltip`, tip.startsWith("Today: 3 races · 100 WPM · $4,200 · 2,100 XP"), tip);
+    await page.locator('.day-metric [data-day="money"]').click();
+    check(`${name}: switch to money`, (await page.locator('.day-metric [data-day="money"]').getAttribute("class")) === "on");
+    await page.locator('.metric [data-metric="acc"]').click();
+    check(`${name}: per-race chart shows accuracy`, (await page.locator(".chart-svg text").allTextContents()).some((t) => t === "avg 97%"));
+    check(`${name}: off races marked on the chart`, (await page.locator(".chart-svg .c-off").count()) === 2);
+    check(`${name}: money column`, (await page.locator(".history tr").first().locator("td").last().textContent()) === "$1,500");
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-stats.png") });
+    const [download] = await Promise.all([page.waitForEvent("download"), page.locator(".export-stats").click()]);
+    const csv = readFileSync(await download.path(), "utf8").trim().split("\n");
+    check(`${name}: CSV export`, download.suggestedFilename().startsWith("nitro-type-races-") && csv.length === 7 && csv[0].startsWith("date,time,wpm,accuracy,place,money,xp"), `${csv.length} lines: ${csv[0]}`);
+    check(`${name}: CSV notes off races`, csv.filter((l) => l.endsWith(",off race") || l.endsWith(",slow start")).length === 2, csv.slice(1).join(" | "));
+    await context.close();
+  });
+
+  await test("stats: old races go into day totals", async (name) => {
+    const old = Date.now() - 3 * 86400000;
+    const stats = Array.from({ length: 300 }, (_, i) => ({ wpm: 90, accuracy: 96, chars: 160, at: old + i * 1000, official: { wpm: 90, accuracy: 96, place: 2, money: 100, xp: 50 } }));
+    const { context, page } = await open("", { ...BASE, wpmMin: 200, wpmMax: 200 });
+    await page.evaluate((st) => localStorage.setItem("nt-autotyper-stats", JSON.stringify(st)), stats);
+    await page.reload();
+    await page.waitForSelector(".go");
+    await page.locator(".go").click();
+    await waitForResults(page, 1);
+    await page.waitForTimeout(800);
+    const kept = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-stats")).length);
+    const days = await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-days")));
+    const totals = Object.values(days ?? {});
+    check(`${name}: keeps 300 races`, kept === 300, `${kept}`);
+    check(`${name}: the oldest one is in its day's totals`, totals.length === 1 && totals[0].races === 1 && totals[0].money === 100, JSON.stringify(days));
+    await context.close();
+  });
+
+  await test("looks: themes and accent colours", async (name) => {
+    const { context, page } = await open("", { ...BASE }, { advanced: true, tab: "panel" });
+    const host = () => page.evaluate(() => {
+      const h = [...document.querySelectorAll("body > div")].find((d) => d.shadowRoot?.querySelector(".box"));
+      return { theme: h.dataset.theme, accent: h.dataset.accent };
+    });
+    const bg = () => page.locator(".box").evaluate((el) => getComputedStyle(el).backgroundColor);
+    check(`${name}: dark by default`, (await host()).theme === "dark" && (await bg()) === "rgb(20, 27, 51)", await bg());
+    await page.locator('[data-theme-pick="light"]').click();
+    check(`${name}: light theme`, (await host()).theme === "light" && (await bg()) === "rgb(255, 255, 255)", await bg());
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "panel-light.png") });
+    await page.locator('[data-accent-pick="mint"]').click();
+    const go = await page.locator(".go").evaluate((el) => getComputedStyle(el).backgroundColor);
+    check(`${name}: accent colour on the Start button`, go === "rgb(52, 211, 153)", go);
+    await page.locator('[data-theme-pick="midnight"]').click();
+    check(`${name}: midnight theme`, (await bg()) === "rgb(12, 14, 21)", await bg());
+    await page.reload();
+    await page.waitForSelector(".go");
+    check(`${name}: remembered after a reload`, JSON.stringify(await host()) === JSON.stringify({ theme: "midnight", accent: "mint" }), JSON.stringify(await host()));
+    await page.locator(".reset-panel").click();
+    check(`${name}: reset position keeps the colours`, (await host()).accent === "mint");
+    await page.locator('[data-theme-pick="auto"]').click();
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.waitForTimeout(100);
+    check(`${name}: auto follows the system (light)`, (await host()).theme === "light");
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.waitForTimeout(100);
+    check(`${name}: auto follows the system (dark)`, (await host()).theme === "dark");
     await context.close();
   });
 

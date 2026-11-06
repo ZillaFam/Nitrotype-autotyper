@@ -1,6 +1,6 @@
 {
   "name": "nitrotype-autotyper",
-  "version": "3.11.0",
+  "version": "3.12.0",
   "private": true,
   "description": "Tampermonkey userscript that autotypes Nitro Type races at a set WPM and accuracy.",
   "type": "module",

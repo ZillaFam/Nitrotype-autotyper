@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.11.0
+// @version      3.12.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.11.0";
+  const VERSION = "3.12.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -923,9 +923,10 @@
 
   // How strong the human touch is (setting "humanLevel").
   const HUMAN = {
-    light: { shape: 0.6, drift: 0.03, pause: 0.5, cluster: 1.25, react: [170, 360] },
-    natural: { shape: 1, drift: 0.06, pause: 1, cluster: 1.6, react: [220, 520] },
-    strong: { shape: 1.35, drift: 0.1, pause: 1.6, cluster: 2, react: [260, 650] },
+    // off / slow: chance per race of an off race (slower, sloppier) or a slow start
+    light: { shape: 0.6, drift: 0.03, pause: 0.5, cluster: 1.25, react: [170, 360], off: 0.04, slow: 0.05 },
+    natural: { shape: 1, drift: 0.06, pause: 1, cluster: 1.6, react: [220, 520], off: 0.07, slow: 0.08 },
+    strong: { shape: 1.35, drift: 0.1, pause: 1.6, cluster: 2, react: [260, 650], off: 0.1, slow: 0.12 },
   };
   const humanProfile = (s) => HUMAN[s?.humanLevel] ?? HUMAN.natural;
 
@@ -973,6 +974,17 @@
     if (progress < 0.05) f *= 1.4 - (progress / 0.05) * 0.4; // warming up
     else if (progress > 0.9) f *= 0.92; // final push
     return f;
+  }
+
+  /**
+   * A slow start: the first 15-30% of the race comes slower, easing into
+   * the normal pace (not made up for later, so the race ends up a bit slower).
+   */
+  function slowStart(rhythm) {
+    const n = Math.max(1, Math.round(rhythm.length * rand(0.15, 0.3)));
+    const k = rand(0.5, 0.9);
+    for (let i = 0; i < n && i < rhythm.length; i++) rhythm[i] *= 1 + k * (1 - i / n);
+    return rhythm;
   }
 
   /** Per-letter timing for a race: the rhythm, plus a slow drift in speed. */
@@ -1187,16 +1199,28 @@
       const text = startRace.text;
       const lo = Math.min(s.wpmMin, s.wpmMax);
       const hi = Math.max(s.wpmMin, s.wpmMax);
-      const target = Math.min(hi, Math.floor(rand(lo, hi + 1)));
+      let target = Math.min(hi, Math.floor(rand(lo, hi + 1)));
       // Accuracy for this race, somewhere in the range (to 0.1%).
-      const accTarget = Math.round(rand(Math.min(s.accMin, s.accMax), Math.max(s.accMin, s.accMax)) * 10) / 10;
+      let accTarget = Math.round(rand(Math.min(s.accMin, s.accMax), Math.max(s.accMin, s.accMax)) * 10) / 10;
       const human = humanProfile(s);
+      // Now and then an off race (slower and a bit sloppier) or a slow start,
+      // like anyone has.
+      let offDay = "";
+      if (s.offDays) {
+        const roll = Math.random();
+        offDay = window.__ntAutotyperOffDay ?? (roll < human.off ? "off" : roll < human.off + human.slow ? "slow" : "");
+      }
+      if (offDay === "off") {
+        target = Math.max(10, Math.round(target * rand(0.8, 0.9)));
+        if (accTarget < 100) accTarget = Math.max(75, Math.round((accTarget - rand(0.5, 2.5)) * 10) / 10);
+      }
       const rhythm = rhythmFor(text, human);
+      if (offDay === "slow") slowStart(rhythm);
       const nitroAt = nitroWordStarts(text, s.nitros);
       LOG("race text:", text);
       LOG("letter classes:", [...document.querySelectorAll(".dash-letter")].slice(0, 3).map((el) => el.className));
       LOG("target WPM:", target, "accuracy:", accTarget, "nitro words at:", [...nitroAt]);
-      this.dbg = { sent: 0, typos: 0, nitrosTried: 0, nitrosUsed: 0, target, accTarget };
+      this.dbg = { sent: 0, typos: 0, nitrosTried: 0, nitrosUsed: 0, target, accTarget, offDay };
       this.watchResults.snapshot(); // what's on screen before the race
       this.progressBefore = readProgress(); // level / season tier, to spot a level up
       listenToServer();
@@ -1294,6 +1318,8 @@
             target,
             accTarget,
             chars: text.length,
+            ms: Math.round(now - startedAt),
+            ...(offDay ? { offDay } : {}),
             at: Date.now(),
           });
         }
@@ -1760,6 +1786,7 @@
   const DEFAULTS = {
     wpmMin: 80, wpmMax: 95, accMin: 96, accMax: 98, variance: 25, nitros: 1, races: 5,
     humanLevel: "natural", // how human the typing is: light, natural, strong
+    offDays: true, // now and then an off race or a slow start
     breakEvery: 0, breakLenMin: 1, breakLenMax: 3, // long break every ~N races (0 = off), minutes
     notify: false, debug: false, notifyAlways: false, alarmSound: true, notifySound: true,
     // which notifications (all need "notify" on)
@@ -1772,14 +1799,21 @@
     miniMap: true, // show a mini map in place of Nitro Type's race track
     keepAlive: true, // keep Nitro Type's page running while minimised (during a session)
   };
-  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap", "keepAlive", "alarmSound", "notifySound"];
+  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap", "keepAlive", "alarmSound", "notifySound", "offDays"];
   const LIMITS = {
     wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
     nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
   };
   // Settings that come as a min/max pair.
   const PAIRS = { wpmMin: "wpmMax", accMin: "accMax", breakLenMin: "breakLenMax" };
-  const KEYS = { settings: "nt-autotyper-settings", stats: "nt-autotyper-stats", ui: "nt-autotyper-ui", session: "nt-autotyper-session", player: "nt-autotyper-player" };
+  const KEYS = {
+    settings: "nt-autotyper-settings",
+    stats: "nt-autotyper-stats",
+    days: "nt-autotyper-days", // day totals of races too old to keep one by one
+    ui: "nt-autotyper-ui",
+    session: "nt-autotyper-session",
+    player: "nt-autotyper-player",
+  };
 
   function readJSON(storage, key, fallback) {
     try {
@@ -1866,6 +1900,7 @@
       // Reloaded while paused for a captcha: keep waiting for it to go.
       if (this.state.paused) this.captchaSeenAt = Date.now();
       this.stats = readJSON(localStorage, KEYS.stats, []);
+      this.days = readJSON(localStorage, KEYS.days, {});
       // Chrome restores a tab's session storage after a restart, a crash or
       // sleep. A session whose last heartbeat is old was interrupted: end it
       // instead of picking up typing again.
@@ -2061,7 +2096,12 @@
     raceDone(result) {
       this.dqInARow = 0;
       this.stats.push(result);
-      if (this.stats.length > 300) this.stats.splice(0, this.stats.length - 300);
+      if (this.stats.length > 300) {
+        // The oldest races go into day totals, so the By day chart keeps them.
+        for (const old of this.stats.splice(0, this.stats.length - 300)) addToDay(this.days, old);
+        pruneDays(this.days);
+        writeJSON(localStorage, KEYS.days, this.days);
+      }
       writeJSON(localStorage, KEYS.stats, this.stats);
       // If Nitro Type's own numbers don't arrive, note the race with ours.
       this.raceNoteTimers.set(result.at, timers.set(() => this.noteRace(result), 11000));
@@ -2139,7 +2179,9 @@
     },
     resetStats() {
       this.stats = [];
+      this.days = {};
       writeJSON(localStorage, KEYS.stats, this.stats);
+      writeJSON(localStorage, KEYS.days, this.days);
       panel.render();
     },
   };
@@ -2527,6 +2569,58 @@
   };
 
   const fmt = (n, digits = 0) => (Number.isFinite(n) ? n.toFixed(digits) : "–");
+  // 1,234 below 100k, then 123.4K, 1.2M
+  const short = (n) =>
+    !Number.isFinite(n) ? "–" : Math.abs(n) < 100000 ? Math.round(n).toLocaleString() : new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  const raceWpm = (r) => r.official?.wpm ?? r.wpm;
+  const raceAcc = (r) => r.official?.accuracy ?? r.accuracy;
+
+  // ---- day totals ------------------------------------------------------------
+  const dayKey = (at) => {
+    const d = new Date(at);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const emptyDay = () => ({ races: 0, wpm: 0, acc: 0, money: 0, xp: 0, wins: 0 });
+  function addToDay(days, r) {
+    const d = (days[dayKey(r.at)] ??= emptyDay());
+    d.races++;
+    d.wpm += raceWpm(r) || 0; // sums: divide by races for the average
+    d.acc += raceAcc(r) || 0;
+    d.money += r.official?.money || 0;
+    d.xp += r.official?.xp || 0;
+    if (r.official?.place === 1) d.wins++;
+  }
+  // Keep a year of day totals at most.
+  function pruneDays(days) {
+    const keys = Object.keys(days).sort();
+    for (const k of keys.slice(0, Math.max(0, keys.length - 366))) delete days[k];
+  }
+  /** Day totals: the archived ones plus the races still kept one by one. */
+  function allDays(archive, races) {
+    const days = {};
+    for (const [k, d] of Object.entries(archive ?? {})) days[k] = { ...d };
+    for (const r of races) addToDay(days, r);
+    return days;
+  }
+  /**
+   * Money and XP per hour of racing: races less than 10 minutes apart count
+   * as one stretch, from the start of its first race to the end of its last.
+   */
+  function perHour(races) {
+    let ms = 0;
+    let money = 0;
+    let xp = 0;
+    let prev = null;
+    for (const r of [...races].sort((a, b) => a.at - b.at)) {
+      const own = r.ms ?? (r.chars && r.wpm ? (r.chars / 5 / r.wpm) * 60000 : 30000);
+      ms += prev !== null && r.at - prev < 10 * 60000 ? r.at - prev : own;
+      prev = r.at;
+      money += r.official?.money || 0;
+      xp += r.official?.xp || 0;
+    }
+    const hours = ms / 3600000;
+    return hours >= 2 / 60 ? { money: money / hours, xp: xp / hours, races: races.length / hours } : null;
+  }
   const average = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
   function timeAgo(ts) {
     const s = Math.round((Date.now() - ts) / 1000);
@@ -2538,15 +2632,34 @@
 
   const PANEL_CSS = `
     :host { all: initial; }
+    /* themes (the host's data-theme) and accent colours (data-accent) */
+    :host {
+      --bg: #141b33; --bg2: #1c2547; --line: #2b3762; --text: #e8edff; --sub: #8e9cc9; --muted: #6b7aa8;
+      --good: #3ddc84; --bad: #ff5c6c; --warn: #f5c451; --info: #9cc3ff;
+      --head1: #212c57; --head2: #1a2346; --shade: rgba(10, 14, 30, .28); --shadow: rgba(0, 0, 0, .45);
+      --accent: #f5a623; --on-accent: #1a1f33;
+    }
+    :host([data-theme="midnight"]) {
+      --bg: #0c0e15; --bg2: #13161f; --line: #242938; --text: #eceef4; --sub: #8a91a8; --muted: #59627c;
+      --head1: #161a26; --head2: #10131c; --shade: rgba(0, 0, 0, .3); --shadow: rgba(0, 0, 0, .6);
+    }
+    :host([data-theme="light"]) {
+      --bg: #ffffff; --bg2: #f2f4f9; --line: #dce0eb; --text: #182038; --sub: #5d6684; --muted: #a3abc2;
+      --good: #148a52; --bad: #d93a48; --warn: #9a6408; --info: #2f5fcf;
+      --head1: #f6f7fb; --head2: #eef1f8; --shade: #f8f9fc; --shadow: rgba(24, 32, 56, .18);
+    }
+    :host([data-accent="sky"]) { --accent: #4fb3ff; }
+    :host([data-accent="mint"]) { --accent: #34d399; }
+    :host([data-accent="pink"]) { --accent: #ff7ab6; }
+    :host([data-accent="violet"]) { --accent: #a78bfa; }
+    :host([data-accent="red"]) { --accent: #ff6b5e; }
     * { box-sizing: border-box; }
     .box {
-      --bg: #141b33; --bg2: #1c2547; --line: #2b3762; --text: #e8edff; --sub: #8e9cc9;
-      --accent: #f5a623; --good: #3ddc84; --bad: #ff5c6c;
       position: fixed; z-index: 1; display: flex; flex-direction: column;
       min-width: 250px; max-width: 520px; min-height: 44px; max-height: calc(100vh - 16px);
       background: var(--bg); color: var(--text);
       border: 1px solid var(--line); border-radius: 14px;
-      box-shadow: 0 12px 40px rgba(0, 0, 0, .45);
+      box-shadow: 0 12px 40px var(--shadow);
       font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
       overflow: hidden; resize: both;
       opacity: var(--idle-opacity, 1); transition: opacity .15s;
@@ -2556,11 +2669,11 @@
     .box.collapsed { resize: none; height: auto !important; min-height: 0; }
     header {
       display: flex; align-items: center; gap: 8px; padding: 10px 12px;
-      background: linear-gradient(90deg, #212c57, #1a2346); cursor: grab; user-select: none;
+      background: linear-gradient(90deg, var(--head1), var(--head2)); cursor: grab; user-select: none;
       touch-action: none; flex: none;
     }
     header:active { cursor: grabbing; }
-    .dot { width: 9px; height: 9px; border-radius: 50%; background: #5d6a94; flex: none; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
     .running .dot { background: var(--good); box-shadow: 0 0 0 3px rgba(61, 220, 132, .2); }
     .title { font-weight: 700; letter-spacing: .2px; flex: 1; white-space: nowrap; }
     .title small { color: var(--sub); font-weight: 500; margin-left: 6px; }
@@ -2573,13 +2686,17 @@
     .status-row { display: flex; align-items: center; gap: 8px; }
     .badge {
       flex: none; font-size: 10.5px; font-weight: 800; letter-spacing: .4px; text-transform: uppercase;
-      padding: 2px 8px; border-radius: 99px; background: #2b3762; color: #8e9cc9;
+      padding: 2px 8px; border-radius: 99px; background: var(--line); color: var(--sub);
+      display: inline-flex; align-items: center; gap: 5px;
     }
-    .badge.typing { background: rgba(61, 220, 132, .16); color: #6be8a4; }
-    .badge.waiting { background: rgba(245, 166, 35, .16); color: #f5c451; }
-    .badge.break { background: rgba(93, 139, 244, .18); color: #9cc3ff; }
-    .badge.paused { background: rgba(255, 92, 108, .2); color: #ff9aa6; }
-    .badge.done { background: rgba(61, 220, 132, .12); color: #9be8bf; }
+    .badge.typing { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
+    .badge.waiting { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+    .badge.break { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+    .badge.paused { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
+    .badge.done { background: color-mix(in srgb, var(--good) 12%, transparent); color: var(--good); }
+    /* a little live dot while typing */
+    .badge.typing::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: blink 1.1s ease-in-out infinite; }
+    @keyframes blink { 50% { opacity: .25; } }
     .running .status { color: var(--text); }
     /* mini track: a lane, a car that drives to the checkered finish, a trail */
     .track {
@@ -2608,11 +2725,11 @@
       color: var(--accent); transition: transform .25s linear; will-change: transform;
     }
     .track .car svg { width: var(--car-w); height: calc(var(--car-w) * 14 / 30); }
-    .box:not(.running) .track .car { color: #6b7aa8; }
+    .box:not(.running) .track .car { color: var(--muted); }
     /* other racers: dots riding along the top of the lane */
     .track .rivals i {
       position: absolute; top: 3px; left: 0; width: 7px; height: 7px; border-radius: 50%;
-      background: #8e9cc9; box-shadow: 0 0 0 2px #1c2547;
+      background: var(--sub); box-shadow: 0 0 0 2px var(--bg2);
       transform: translateX(calc(4px + var(--run) * var(--rp, 0) + var(--car-w) / 2 - 50%));
     }
     .f-track .rivals i { top: 5px; width: 9px; height: 9px; background: #9aa3bd; box-shadow: 0 0 0 2px #1d2232; }
@@ -2625,7 +2742,7 @@
     .p-wpm { text-align: right; }
     .p-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .p-bar { height: 4px; border-radius: 99px; background: var(--line); overflow: hidden; }
-    .p-bar i { display: block; height: 100%; background: #6b7aa8; transform-origin: left center; }
+    .p-bar i { display: block; height: 100%; background: var(--muted); transform-origin: left center; }
     .p-row.me .p-bar i { background: var(--accent); }
     /* after a race: place badge, your numbers, final standings */
     .result-card {
@@ -2635,7 +2752,7 @@
     .result-card[hidden] { display: none; }
     .rc-place {
       grid-row: span 2; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
-      font-weight: 800; font-size: 14px; background: #34406a; color: var(--text);
+      font-weight: 800; font-size: 14px; background: var(--line); color: var(--text);
     }
     .rc-place.p1 { background: #e3b341; color: #2a2108; }
     .rc-place.p2 { background: #c3cbdb; color: #1f2433; }
@@ -2676,7 +2793,7 @@
     /* the Race tab: settings in small groups */
     .group {
       display: flex; flex-direction: column; gap: 10px; padding: 10px 10px 11px;
-      border: 1px solid var(--line); border-radius: 10px; background: rgba(10, 14, 30, .28);
+      border: 1px solid var(--line); border-radius: 10px; background: var(--shade);
     }
     .g-head { font-size: 10.5px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; color: var(--sub); }
     .group input[type=number] { background: var(--bg2); }
@@ -2686,15 +2803,26 @@
       font-size: 12px; font-weight: 700; color: var(--sub); transition: background .12s, color .12s;
     }
     .seg button:hover { color: var(--text); }
-    .seg button.on { background: var(--accent); color: #1a1f33; }
+    .seg button.on { background: var(--accent); color: var(--on-accent); }
+    .seg.four { grid-template-columns: repeat(4, 1fr); }
+    .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+    .swatches button {
+      all: unset; cursor: pointer; width: 22px; height: 22px; border-radius: 50%; background: var(--sw);
+      box-shadow: inset 0 0 0 2px rgba(0, 0, 0, .15); transition: transform .12s;
+    }
+    .swatches button:hover { transform: scale(1.12); }
+    .swatches button.on { box-shadow: 0 0 0 2px var(--bg2), 0 0 0 4px var(--sw); }
+    .swatches button:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
     .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     .hint { color: var(--sub); font-size: 11px; margin-top: 3px; }
     .go {
       all: unset; text-align: center; cursor: pointer; padding: 10px; border-radius: 10px;
-      background: var(--accent); color: #1a1f33; font-weight: 800; letter-spacing: .3px; flex: none;
+      background: var(--accent); color: var(--on-accent); font-weight: 800; letter-spacing: .3px; flex: none;
+      transition: filter .12s, transform .08s;
       margin: 0 8px 8px;
     }
     .go:hover { filter: brightness(1.08); }
+    .go:active { transform: scale(.985); }
     .running .go { background: var(--bad); color: #fff; }
     .foot {
       display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -2707,7 +2835,7 @@
       content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%;
       background: var(--sub); transition: transform .15s, background .15s;
     }
-    .switch input:checked + .knob { background: rgba(245, 166, 35, .35); }
+    .switch input:checked + .knob { background: color-mix(in srgb, var(--accent) 35%, transparent); }
     .switch input:checked + .knob::after { transform: translateX(12px); background: var(--accent); }
     .switch input:focus-visible + .knob { outline: 2px solid var(--accent); outline-offset: 2px; }
     /* simple mode: just the essentials */
@@ -2766,10 +2894,48 @@
     .card { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
     .card .k { color: var(--sub); font-size: 11px; }
     .card .v { font-size: 18px; font-weight: 700; }
+    .card .sub { color: var(--sub); font-size: 10.5px; }
+    .cards.nine { grid-template-columns: repeat(3, 1fr); }
+    .cards.nine .card { padding: 7px 8px; min-width: 0; }
+    .cards.nine .v { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+    .today { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 8px 10px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); font-size: 12px; color: var(--sub); }
+    .today b { color: var(--text); }
+    .today span:not(:first-of-type)::before { content: "· "; color: var(--muted); }
+    .mini-seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px; background: var(--bg); border: 1px solid var(--line); }
+    .mini-seg button { all: unset; cursor: pointer; padding: 1px 7px; border-radius: 5px; font-size: 11px; font-weight: 600; color: var(--sub); }
+    .mini-seg button.on { background: var(--line); color: var(--text); }
+    .chart-title { align-items: center; }
+    .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    /* chart colours follow the theme */
+    .c-grid { stroke: var(--line); stroke-width: 1; }
+    .c-avg { stroke: var(--sub); stroke-width: 1; stroke-dasharray: 3 4; }
+    .cross { stroke-dasharray: none; }
+    .c-lbl { fill: var(--sub); }
+    .c-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+    .c-dot { fill: var(--accent); stroke: var(--bg2); stroke-width: 2; }
+    .c-off { fill: var(--bg2); stroke: var(--warn); stroke-width: 1.5; }
+    .c-bar { fill: color-mix(in srgb, var(--accent) 55%, transparent); }
+    .c-bar.now { fill: var(--accent); }
+    .c-bar.zero { fill: var(--line); }
+    /* small touches: tabs fade in, the result card pops, 1st place shines */
+    section.on { animation: fade-in .16s ease-out; }
+    @keyframes fade-in { from { opacity: 0; transform: translateY(3px); } }
+    .result-card:not([hidden]) { animation: pop-in .28s cubic-bezier(.2, .9, .3, 1.2); }
+    @keyframes pop-in { from { opacity: 0; transform: translateY(6px) scale(.97); } }
+    .rc-place.p1 { animation: shine 1.6s ease-out 2; }
+    @keyframes shine { 0% { box-shadow: 0 0 0 0 rgba(227, 179, 65, .6); } 100% { box-shadow: 0 0 0 10px rgba(227, 179, 65, 0); } }
+    @media (prefers-reduced-motion: reduce) {
+      section.on, .result-card:not([hidden]), .rc-place.p1, .badge.typing::before { animation: none; }
+    }
     table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
     th { text-align: right; color: var(--sub); font-weight: 600; padding: 3px 4px; border-bottom: 1px solid var(--line); }
-    td { text-align: right; padding: 3px 4px; border-bottom: 1px solid rgba(43, 55, 98, .5); }
+    td { text-align: right; padding: 3px 4px; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
+    td .tag { margin-left: 5px; font-size: 9.5px; font-weight: 700; padding: 0 5px; border-radius: 99px; color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+    td .pl.p1 { color: #e3b341; font-weight: 700; }
+    td .pl.p2 { color: #b9c2d6; font-weight: 700; }
+    td .pl.p3 { color: #c98a5a; font-weight: 700; }
     th:first-child, td:first-child { text-align: left; }
+    td:first-child { white-space: nowrap; }
     .empty { color: var(--sub); text-align: center; padding: 8px; }
     .btn2 { all: unset; cursor: pointer; text-align: center; padding: 7px; border-radius: 8px; border: 1px solid var(--line); color: var(--sub); }
     .btn2:hover { color: var(--text); border-color: var(--sub); }
@@ -2787,16 +2953,16 @@
     }
     .toast {
       pointer-events: auto; display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: start;
-      padding: 10px 12px; border-radius: 12px; color: #e8edff; background: #1c2547; border: 1px solid #2b3762;
-      border-left: 4px solid #5d8bf4; box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+      padding: 10px 12px; border-radius: 12px; color: var(--text); background: var(--bg2); border: 1px solid var(--line);
+      border-left: 4px solid #5d8bf4; box-shadow: 0 10px 30px var(--shadow);
       animation: toast-in .18s ease-out;
     }
     .toast.high { border-left-color: #f5a623; }
-    .toast.urgent { border-left-color: #ff5c6c; background: #3a1820; border-color: #6a1f2a; }
+    .toast.urgent { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 16%, var(--bg2)); border-color: color-mix(in srgb, var(--bad) 40%, var(--bg2)); }
     .toast b { font-size: 13.5px; }
-    .toast p { grid-column: 1; margin: 0; color: #c3cbe6; }
-    .toast button { all: unset; cursor: pointer; grid-row: 1 / span 2; grid-column: 2; color: #8e9cc9; padding: 0 4px; font-size: 15px; }
-    .toast button:hover { color: #fff; }
+    .toast p { grid-column: 1; margin: 0; color: var(--sub); }
+    .toast button { all: unset; cursor: pointer; grid-row: 1 / span 2; grid-column: 2; color: var(--sub); padding: 0 4px; font-size: 15px; }
+    .toast button:hover { color: var(--text); }
     @keyframes toast-in { from { transform: translateY(-8px); opacity: 0; } }
     .levels-hint { color: var(--sub); font-size: 11px; }
     .nrow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; }
@@ -2824,8 +2990,6 @@
     .breaks { display: grid; grid-template-columns: auto 52px auto; align-items: center; gap: 6px; color: var(--sub); font-size: 12px; }
     .breaks input[type=number] { width: 52px; }
     .breaks .len { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; }
-    .cards.six { grid-template-columns: repeat(3, 1fr); }
-    .cards.six .v { font-size: 16px; }
     .footnote { color: var(--sub); font-size: 11px; }
     .chart-title { display: flex; justify-content: space-between; color: var(--sub); font-size: 12px; margin-bottom: 2px; }
     .chart { position: relative; touch-action: none; }
@@ -2906,6 +3070,7 @@
                 </div>
                 <div class="hint human-hint"></div>
               </div>
+              <label class="check"><input type="checkbox" data-k="offDays"><span>Off races now and then<small>Once in a while a slower, sloppier race, or a slow start.</small></span></label>
               <div class="field adv">
                 <div class="lbl">Timing variation <b><span data-show="variance"></span>%</b></div>
                 <div class="row"><input type="range" data-k="variance" min="0" max="60"></div>
@@ -2936,26 +3101,55 @@
             </div>
           </section>
           <section data-tab="stats">
-            <div class="cards six">
+            <div class="today"></div>
+            <div class="cards nine">
               <div class="card"><div class="k">Races</div><div class="v s-races"></div></div>
               <div class="card"><div class="k">Avg WPM</div><div class="v s-wpm"></div></div>
               <div class="card"><div class="k">Avg acc</div><div class="v s-acc"></div></div>
               <div class="card"><div class="k">Best WPM</div><div class="v s-best"></div></div>
+              <div class="card"><div class="k">Wins</div><div class="v s-wins"></div><div class="sub s-winrate"></div></div>
+              <div class="card"><div class="k">Top 3</div><div class="v s-podium"></div></div>
               <div class="card"><div class="k">Money</div><div class="v s-money"></div></div>
               <div class="card"><div class="k">XP</div><div class="v s-xp"></div></div>
+              <div class="card" title="Per hour of racing (breaks over 10 minutes don't count)"><div class="k">Per hour</div><div class="v s-rate"></div><div class="sub s-rate-xp"></div></div>
             </div>
             <div>
-              <div class="chart-title"><span>WPM per race</span><span class="chart-range"></span></div>
-              <div class="chart"><svg class="chart-svg" role="img" aria-label="WPM per race"></svg><div class="tip"></div></div>
+              <div class="chart-title"><span class="mini-seg metric"><button data-metric="wpm">WPM</button><button data-metric="acc">Accuracy</button></span><span class="chart-range"></span></div>
+              <div class="chart"><svg class="chart-svg" role="img" aria-label="Per race"></svg><div class="tip"></div></div>
+            </div>
+            <div>
+              <div class="chart-title"><span class="mini-seg day-metric"><button data-day="races">Races</button><button data-day="money">Money</button><button data-day="xp">XP</button></span><span>by day</span></div>
+              <div class="chart days"><svg class="days-svg" role="img" aria-label="By day"></svg><div class="tip"></div></div>
             </div>
             <table>
-              <thead><tr><th>When</th><th>WPM</th><th>Acc</th><th>Place</th><th>Nitros</th></tr></thead>
+              <thead><tr><th>When</th><th>WPM</th><th>Acc</th><th>Place</th><th>Money</th></tr></thead>
               <tbody class="history"></tbody>
             </table>
             <div class="footnote"></div>
-            <button class="btn2 reset-stats">Reset stats</button>
+            <div class="btn-row"><button class="btn2 export-stats">Export CSV</button><button class="btn2 reset-stats">Reset stats</button></div>
           </section>
           <section data-tab="panel">
+            <div class="field">
+              <div class="lbl">Theme</div>
+              <div class="seg four" role="radiogroup" aria-label="Theme">
+                <button role="radio" data-theme-pick="dark">Dark</button><button role="radio" data-theme-pick="midnight">Midnight</button><button role="radio" data-theme-pick="light">Light</button><button role="radio" data-theme-pick="auto">Auto</button>
+              </div>
+            </div>
+            <div class="field">
+              <div class="lbl">Accent</div>
+              <div class="swatches" role="radiogroup" aria-label="Accent colour">
+                ${[
+                  ["amber", "#f5a623", "Amber"],
+                  ["sky", "#4fb3ff", "Sky"],
+                  ["mint", "#34d399", "Mint"],
+                  ["pink", "#ff7ab6", "Pink"],
+                  ["violet", "#a78bfa", "Violet"],
+                  ["red", "#ff6b5e", "Coral"],
+                ]
+                  .map(([key, color, label]) => `<button role="radio" data-accent-pick="${key}" style="--sw:${color}" title="${label}" aria-label="${label}"></button>`)
+                  .join("")}
+              </div>
+            </div>
             <div class="field">
               <div class="lbl">Opacity when not hovered <b><span class="opLabel"></span>%</b></div>
               <div class="row"><input type="range" class="opacity" min="20" max="100"></div>
@@ -3035,7 +3229,7 @@
     const $$ = (sel) => [...root.querySelectorAll(sel)];
     const box = $(".box");
     let settings = loadSettings();
-    const UI_DEFAULTS = { x: 16, y: null, w: 290, h: null, collapsed: false, compact: false, advanced: false, tab: "race", opacity: 100 };
+    const UI_DEFAULTS = { x: 16, y: null, w: 290, h: null, collapsed: false, compact: false, advanced: false, tab: "race", opacity: 100, theme: "dark", accent: "amber" };
     let ui = { ...UI_DEFAULTS, ...readJSON(localStorage, KEYS.ui, {}) };
     const saveUI = () => writeJSON(localStorage, KEYS.ui, ui);
 
@@ -3050,7 +3244,41 @@
       box.style.left = `${ui.x}px`;
       box.style.top = `${ui.y}px`;
     }
+    // Theme and accent colour: on the host, so the panel, its pop-ups and
+    // everything in it follow.
+    const lightScheme = window.matchMedia?.("(prefers-color-scheme: light)");
+    function applyTheme() {
+      const theme = ui.theme === "auto" ? (lightScheme?.matches ? "light" : "dark") : ui.theme;
+      panelHost.dataset.theme = theme;
+      panelHost.dataset.accent = ui.accent;
+      for (const b of $$("[data-theme-pick]")) {
+        b.classList.toggle("on", b.dataset.themePick === ui.theme);
+        b.setAttribute("aria-checked", String(b.dataset.themePick === ui.theme));
+      }
+      for (const b of $$("[data-accent-pick]")) {
+        b.classList.toggle("on", b.dataset.accentPick === ui.accent);
+        b.setAttribute("aria-checked", String(b.dataset.accentPick === ui.accent));
+      }
+    }
+    lightScheme?.addEventListener?.("change", () => ui.theme === "auto" && applyTheme());
+    for (const b of $$("[data-theme-pick]")) {
+      b.addEventListener("click", () => {
+        ui.theme = b.dataset.themePick;
+        saveUI();
+        applyTheme();
+        if (ui.tab === "stats") renderStats();
+      });
+    }
+    for (const b of $$("[data-accent-pick]")) {
+      b.addEventListener("click", () => {
+        ui.accent = b.dataset.accentPick;
+        saveUI();
+        applyTheme();
+      });
+    }
+
     function applyLayout() {
+      applyTheme();
       box.style.width = `${ui.w}px`;
       box.style.height = ui.h && !ui.collapsed && !ui.compact && ui.advanced ? `${ui.h}px` : "";
       box.classList.toggle("simple", !ui.advanced);
@@ -3203,7 +3431,8 @@
       applyLayout();
     });
     $(".reset-panel").addEventListener("click", () => {
-      ui = { ...UI_DEFAULTS, tab: "panel" };
+      // Position and size only: keeps your colours and the Advanced switch.
+      ui = { ...UI_DEFAULTS, tab: "panel", theme: ui.theme, accent: ui.accent, advanced: ui.advanced };
       box.style.height = "";
       saveUI();
       applyLayout();
@@ -3601,8 +3830,11 @@
     // ---- chart ---------------------------------------------------------------
     const wpmOf = (r) => r.official?.wpm ?? r.wpm;
     const accOf = (r) => r.official?.accuracy ?? r.accuracy;
-    const LINE = "#d07f10"; // checked for contrast and lightness on the panel background
     let chartGeom = null;
+    const METRICS = {
+      wpm: { of: wpmOf, step: 5, minPad: 5, label: (v) => fmt(v) },
+      acc: { of: accOf, step: 1, minPad: 1, label: (v) => `${fmt(v)}%` },
+    };
 
     function renderChart() {
       const wrap = $(".chart");
@@ -3616,15 +3848,17 @@
       $(".chart-range").textContent = races.length ? `last ${races.length} race${races.length === 1 ? "" : "s"}` : "";
       if (races.length < 2) {
         chartGeom = null;
-        setHTML(svg, `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="#8e9cc9" font-size="12">The chart starts after 2 races</text>`);
+        setHTML(svg, `<text class="c-lbl" x="${W / 2}" y="${H / 2}" text-anchor="middle" font-size="12">The chart starts after 2 races</text>`);
         return;
       }
-      const vals = races.map(wpmOf);
+      const metric = METRICS[ui.metric] ?? METRICS.wpm;
+      const vals = races.map(metric.of);
       let lo = Math.min(...vals);
       let hi = Math.max(...vals);
-      const padV = Math.max(5, (hi - lo) * 0.15);
-      lo = Math.max(0, Math.floor((lo - padV) / 5) * 5);
-      hi = Math.ceil((hi + padV) / 5) * 5;
+      const padV = Math.max(metric.minPad, (hi - lo) * 0.15);
+      lo = Math.max(0, Math.floor((lo - padV) / metric.step) * metric.step);
+      hi = Math.ceil((hi + padV) / metric.step) * metric.step;
+      if (ui.metric === "acc") hi = Math.min(100, hi);
       const L = 30;
       const R = 8;
       const T = 8;
@@ -3634,22 +3868,135 @@
       const avg = average(vals);
       const pts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
       const last = vals.length - 1;
-      chartGeom = { races, x, y, L, R, W };
+      chartGeom = { races, x, y, L, R, W, of: metric.of };
+      // Off races and slow starts: a hollow dot.
+      const marks = races
+        .map((r, i) => (r.offDay ? `<circle class="c-off" cx="${x(i).toFixed(1)}" cy="${y(vals[i]).toFixed(1)}" r="3"><title>${r.offDay === "off" ? "off race" : "slow start"}</title></circle>` : ""))
+        .join("");
       setHTML(
         svg,
         `
-        <line x1="${L}" x2="${W - R}" y1="${y(hi)}" y2="${y(hi)}" stroke="#2b3762" stroke-width="1"/>
-        <line x1="${L}" x2="${W - R}" y1="${y(lo)}" y2="${y(lo)}" stroke="#2b3762" stroke-width="1"/>
-        <text x="${L - 6}" y="${y(hi) + 4}" text-anchor="end" fill="#8e9cc9" font-size="10">${hi}</text>
-        <text x="${L - 6}" y="${y(lo) + 4}" text-anchor="end" fill="#8e9cc9" font-size="10">${lo}</text>
-        <line x1="${L}" x2="${W - R}" y1="${y(avg)}" y2="${y(avg)}" stroke="#8e9cc9" stroke-width="1" stroke-dasharray="3 4"/>
-        <text x="${L + 4}" y="${y(avg) - 4}" text-anchor="start" fill="#8e9cc9" font-size="10">avg ${fmt(avg)}</text>
-        <polyline points="${pts}" fill="none" stroke="${LINE}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-        <circle cx="${x(last)}" cy="${y(vals[last])}" r="4" fill="${LINE}" stroke="#1c2547" stroke-width="2"/>
-        <line class="cross" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="#8e9cc9" stroke-width="1" visibility="hidden"/>
-        <circle class="hover-dot" r="4" fill="${LINE}" stroke="#1c2547" stroke-width="2" visibility="hidden"/>`,
+        <line class="c-grid" x1="${L}" x2="${W - R}" y1="${y(hi)}" y2="${y(hi)}"/>
+        <line class="c-grid" x1="${L}" x2="${W - R}" y1="${y(lo)}" y2="${y(lo)}"/>
+        <text class="c-lbl" x="${L - 6}" y="${y(hi) + 4}" text-anchor="end" font-size="10">${hi}</text>
+        <text class="c-lbl" x="${L - 6}" y="${y(lo) + 4}" text-anchor="end" font-size="10">${lo}</text>
+        <line class="c-avg" x1="${L}" x2="${W - R}" y1="${y(avg)}" y2="${y(avg)}"/>
+        <text class="c-lbl" x="${L + 4}" y="${y(avg) - 4}" text-anchor="start" font-size="10">avg ${metric.label(avg)}</text>
+        <polyline class="c-line" points="${pts}"/>
+        ${marks}
+        <circle class="c-dot" cx="${x(last)}" cy="${y(vals[last])}" r="4"/>
+        <line class="cross c-avg" x1="0" x2="0" y1="${T}" y2="${H - B}" visibility="hidden"/>
+        <circle class="hover-dot c-dot" r="4" visibility="hidden"/>`,
       );
     }
+
+    // ---- by day: the last 14 days as bars ------------------------------------
+    let dayGeom = null;
+    const DAY_METRICS = {
+      races: { of: (d) => d.races, label: (v) => `${v}` },
+      money: { of: (d) => d.money, label: (v) => `$${short(v)}` },
+      xp: { of: (d) => d.xp, label: (v) => short(v) },
+    };
+    function renderDays() {
+      const wrap = $(".chart.days");
+      const svg = $(".days-svg");
+      const W = Math.round(wrap.clientWidth);
+      if (!W) return;
+      const H = 92;
+      svg.setAttribute("width", W);
+      svg.setAttribute("height", H);
+      const days = allDays(session.days, session.stats);
+      const keys = [];
+      for (let i = 13; i >= 0; i--) keys.push(dayKey(Date.now() - i * 86400000));
+      const metric = DAY_METRICS[ui.dayMetric] ?? DAY_METRICS.races;
+      const vals = keys.map((k) => (days[k] ? metric.of(days[k]) : 0));
+      const top = Math.max(1, ...vals);
+      const L = 4;
+      const B = 16;
+      const slot = (W - L * 2) / keys.length;
+      const bw = Math.max(4, slot * 0.62);
+      const h = (v) => (v / top) * (H - B - 14);
+      dayGeom = { keys, days, slot, L, W };
+      const label = (k) => new Date(`${k}T12:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+      setHTML(
+        svg,
+        vals
+          .map((v, i) => {
+            const cx = L + slot * i + slot / 2;
+            const today = i === keys.length - 1;
+            return `<rect class="c-bar${today ? " now" : ""}${v ? "" : " zero"}" x="${(cx - bw / 2).toFixed(1)}" y="${(H - B - Math.max(v ? 2 : 1, h(v))).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(v ? 2 : 1, h(v)).toFixed(1)}" rx="2"/>`;
+          })
+          .join("") +
+          `<text class="c-lbl" x="${L}" y="${H - 3}" font-size="10">${label(keys[0])}</text>` +
+          `<text class="c-lbl" x="${W - L}" y="${H - 3}" text-anchor="end" font-size="10">today</text>` +
+          `<text class="c-lbl" x="${W - L}" y="10" text-anchor="end" font-size="10">${metric.label(top === 1 && !vals.some(Boolean) ? 0 : top)}</text>`,
+      );
+    }
+    $(".chart.days").addEventListener("pointermove", (e) => {
+      if (!dayGeom) return;
+      const { keys, days, slot, L, W } = dayGeom;
+      const rect = $(".chart.days").getBoundingClientRect();
+      const i = Math.max(0, Math.min(keys.length - 1, Math.floor((e.clientX - rect.left - L) / slot)));
+      const d = days[keys[i]];
+      const when = i === keys.length - 1 ? "Today" : new Date(`${keys[i]}T12:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+      const tip = $(".chart.days .tip");
+      tip.textContent = d
+        ? `${when}: ${d.races} race${d.races === 1 ? "" : "s"} · ${fmt(d.wpm / d.races)} WPM · $${short(d.money)} · ${short(d.xp)} XP`
+        : `${when}: no races`;
+      tip.style.display = "block";
+      tip.style.left = `${Math.max(90, Math.min(W - 90, L + slot * i + slot / 2))}px`;
+      tip.style.top = "0px";
+    });
+    $(".chart.days").addEventListener("pointerleave", () => ($(".chart.days .tip").style.display = "none"));
+
+    // the two charts' switches
+    for (const b of $$(".metric [data-metric]")) {
+      b.addEventListener("click", () => {
+        ui.metric = b.dataset.metric;
+        saveUI();
+        renderStats();
+      });
+    }
+    for (const b of $$(".day-metric [data-day]")) {
+      b.addEventListener("click", () => {
+        ui.dayMetric = b.dataset.day;
+        saveUI();
+        renderStats();
+      });
+    }
+
+    // ---- export ----------------------------------------------------------------
+    $(".export-stats").addEventListener("click", () => {
+      const head = ["date", "time", "wpm", "accuracy", "place", "money", "xp", "nitros", "target_wpm", "target_accuracy", "source", "note"];
+      const rows = session.stats.map((r) => {
+        const d = new Date(r.at);
+        return [
+          dayKey(r.at),
+          d.toTimeString().slice(0, 8),
+          fmt(wpmOf(r), 1),
+          fmt(accOf(r), 1),
+          r.official?.place ?? "",
+          r.official?.money ?? "",
+          r.official?.xp ?? "",
+          r.nitros ?? 0,
+          r.target ?? "",
+          r.accTarget ?? "",
+          r.official ? "nitro type" : "estimate",
+          r.offDay === "off" ? "off race" : r.offDay === "slow" ? "slow start" : "",
+        ];
+      });
+      const cell = (v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+      const csv = [head, ...rows].map((row) => row.map(cell).join(",")).join("\n");
+      const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `nitro-type-races-${dayKey(Date.now())}.csv`;
+      root.appendChild(a);
+      a.click();
+      a.remove();
+      timers.set(() => URL.revokeObjectURL(url), 10000);
+      $(".export-stats").blur();
+    });
 
     // Hover anywhere on the chart: crosshair on the nearest race + tooltip.
     $(".chart").addEventListener("pointermove", (e) => {
@@ -3660,7 +4007,7 @@
       const i = Math.max(0, Math.min(races.length - 1, Math.round(((px - L) / (W - L - R)) * (races.length - 1))));
       const r = races[i];
       const cx = x(i);
-      const cy = y(wpmOf(r));
+      const cy = y(chartGeom.of(r));
       const cross = $(".cross");
       cross.setAttribute("x1", cx);
       cross.setAttribute("x2", cx);
@@ -3670,7 +4017,8 @@
       dot.setAttribute("cy", cy);
       dot.setAttribute("visibility", "visible");
       const tip = $(".chart .tip");
-      tip.textContent = `${fmt(wpmOf(r))} WPM${r.official ? "" : " (est.)"} · ${fmt(accOf(r), 1)}% · ${timeAgo(r.at)}`;
+      const note = r.offDay === "off" ? " · off race" : r.offDay === "slow" ? " · slow start" : "";
+      tip.textContent = `${fmt(wpmOf(r))} WPM${r.official ? "" : " (est.)"} · ${fmt(accOf(r), 1)}% · ${timeAgo(r.at)}${note}`;
       tip.style.display = "block";
       tip.style.left = `${Math.max(70, Math.min(W - 70, cx))}px`;
       tip.style.top = `${cy - 6}px`;
@@ -3688,13 +4036,42 @@
       const st = session.stats;
       const money = st.map((r) => r.official?.money).filter(Number.isFinite);
       const xp = st.map((r) => r.official?.xp).filter(Number.isFinite);
+      const placed = st.filter((r) => r.official?.place);
+      const wins = placed.filter((r) => r.official.place === 1).length;
       $(".s-races").textContent = st.length;
       $(".s-wpm").textContent = fmt(average(st.map(wpmOf)));
       $(".s-acc").textContent = st.length ? `${fmt(average(st.map(accOf)), 1)}%` : "–";
       $(".s-best").textContent = st.length ? fmt(Math.max(...st.map(wpmOf))) : "–";
-      $(".s-money").textContent = money.length ? `$${sum(money).toLocaleString()}` : "–";
-      $(".s-xp").textContent = xp.length ? sum(xp).toLocaleString() : "–";
+      $(".s-wins").textContent = placed.length ? wins : "–";
+      $(".s-winrate").textContent = placed.length ? `${fmt((100 * wins) / placed.length)}% of races` : "";
+      $(".s-podium").textContent = placed.length ? `${fmt((100 * placed.filter((r) => r.official.place <= 3).length) / placed.length)}%` : "–";
+      $(".s-money").textContent = money.length ? `$${short(sum(money))}` : "–";
+      $(".s-xp").textContent = xp.length ? short(sum(xp)) : "–";
+      const rate = money.length || xp.length ? perHour(st) : null;
+      $(".s-rate").textContent = rate ? `$${short(rate.money)}` : "–";
+      $(".s-rate-xp").textContent = rate ? `${short(rate.xp)} XP` : "";
+      // Today, at a glance.
+      const today = allDays(session.days, st)[dayKey(Date.now())];
+      setHTML(
+        $(".today"),
+        today
+          ? [
+              `<b>Today</b>`,
+              `${today.races} race${today.races === 1 ? "" : "s"}`,
+              `${fmt(today.wpm / today.races)} WPM`,
+              today.money ? `+$${short(today.money)}` : "",
+              today.xp ? `+${short(today.xp)} XP` : "",
+              today.wins ? `${today.wins} win${today.wins === 1 ? "" : "s"}` : "",
+            ]
+              .filter(Boolean)
+              .map((t) => `<span>${t}</span>`)
+              .join("")
+          : `<b>Today</b><span>no races yet</span>`,
+      );
+      for (const b of $$(".metric [data-metric]")) b.classList.toggle("on", b.dataset.metric === (ui.metric ?? "wpm"));
+      for (const b of $$(".day-metric [data-day]")) b.classList.toggle("on", b.dataset.day === (ui.dayMetric ?? "races"));
       renderChart();
+      renderDays();
       const rows = st.slice(-25).reverse();
       setHTML(
         $(".history"),
@@ -3702,8 +4079,13 @@
           ? rows
               .map((r) => {
                 const est = r.official ? "" : "~";
-                const tip = `target ${r.target ?? "?"} WPM, ${r.accTarget ?? "?"}%` + (r.official?.money ? `, $${r.official.money}` : "") + (r.official?.xp ? `, ${r.official.xp} XP` : "");
-                return `<tr title="${tip}"><td>${timeAgo(r.at)}</td><td>${est}${fmt(wpmOf(r))}</td><td>${est}${fmt(accOf(r), 1)}%</td><td>${r.official?.place ? ordinal(r.official.place) : "–"}</td><td>${r.nitros ?? 0}</td></tr>`;
+                const tip =
+                  `target ${r.target ?? "?"} WPM, ${r.accTarget ?? "?"}%, ${r.nitros ?? 0} nitro${r.nitros === 1 ? "" : "s"}` +
+                  (r.official?.xp ? `, ${r.official.xp} XP` : "") +
+                  (r.offDay === "off" ? " (an off race)" : r.offDay === "slow" ? " (a slow start)" : "");
+                const tag = r.offDay ? `<span class="tag">${r.offDay === "off" ? "off" : "slow"}</span>` : "";
+                const place = r.official?.place ? `<span class="pl${r.official.place <= 3 ? ` p${r.official.place}` : ""}">${ordinal(r.official.place)}</span>` : "–";
+                return `<tr title="${tip}"><td>${timeAgo(r.at)}${tag}</td><td>${est}${fmt(wpmOf(r))}</td><td>${est}${fmt(accOf(r), 1)}%</td><td>${place}</td><td>${Number.isFinite(r.official?.money) ? `$${short(r.official.money)}` : "–"}</td></tr>`;
               })
               .join("")
           : `<tr><td colspan="5" class="empty">No races yet</td></tr>`,

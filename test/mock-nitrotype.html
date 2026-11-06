@@ -168,6 +168,7 @@
           finishOrder = 0;
           clearInterval(botTimer);
           setTimeout(() => {
+            if (race !== r) return; // replaced by a newer race (Race Again pressed twice)
             r.started = true;
             r.startedAt = performance.now();
             if (params.get("status") !== "none") emit("status", { status: "racing" });

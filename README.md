@@ -7,12 +7,14 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
 - **Speed range**: set a min and max WPM, and each race picks a random target inside it. Speed is checked against real progress on every key, so each race lands close to its target.
 - **Human rhythm**: modelled on touch typing. Keys on alternating hands come fast; the same finger on a new key, or a reach to another row, is slower. Common words ("the", "and", "with") go on autopilot; capitals, numbers and punctuation are slower; there's a beat after each sentence, a shorter one after a comma, and a moment before long words. The speed also drifts up and down a little over each race, with a warm-up at the start and a push at the end.
 - **Human reaction at GO**: when Nitro Type's race server says GO, the first key comes a human reaction time later (about 0.2–0.5 s). If the script can't hear that signal, it keeps trying the first key until the race takes it, as before.
+- **Off races now and then** (on by default): once in a while a race comes out slower and a bit sloppier (80–90% of the speed it picked), or starts slow and eases into its pace. More often at Strong, less at Light. They're tagged in the stats.
 - **Human touch** (Light, Natural, Strong): how strong all of this is. Strong means bigger speed swings, longer pauses and a slower start. Timing variation (Advanced) adds random gaps on top. The race still averages your chosen speed.
 - **Accuracy range** (80–100%): each race picks its own accuracy inside the range. Four kinds of typo: a neighbouring key, Shift missed on a capital, the next letter too early, or the previous key again. Like a person, it pauses and then presses the right key, slows down for a few keys, and is a bit more likely to slip again right after a mistake (typos come in little bursts).
 - **Nitros**: uses the number you choose per race on the longest words. If you run out, it just types the word.
 - **Multi-race sessions**: set *Races to run*, press Start, and it types every race, clicks "Race Again" after a short random pause, and stops when it's done. If there's no button, it reloads the race page.
 - **Long breaks**: optionally take a 1–3 minute (or whatever you set) break roughly every N races. The count varies a little each time. A countdown shows in the panel and the tab title (`❚❚ 8/20 · …`).
 - **Stats with Nitro Type's own results**: after each race it takes your official WPM, accuracy and place from Nitro Type's race state (the same data other Nitro Type userscripts read). **Money and XP** are your totals after the race minus before it: the totals Nitro Type sends with the finishing race update (`rewards.current`), or its saved state (`persist:nt`); the results screen's rewards box is only a fallback. Your login token is never used. Without the race state it reads your own row (`.is-self`) in the results table.
+- **Stats tab**: a "Today" line (races, WPM, money, XP, wins); cards for races, average WPM and accuracy, best WPM, wins and win rate, top-3 rate, money, XP, and **money and XP per hour of racing** (breaks over 10 minutes don't count); a per-race chart of WPM or accuracy (off races are hollow dots); a **by day** chart of races, money or XP for the last 14 days (races older than the last 300 are kept as day totals, for up to a year); the race history with money and place; and **Export CSV** for your last 300 races.
 - **Mini map** (on by default; Panel tab to switch off): a light five-lane map in place of Nitro Type's race track. A block per racer (you in coral, players blue, bots grey, the Wampus orange), start and finish lines, an orange streak when someone uses a nitro, and places at the finish. Nitro Type's track is only hidden, and comes back when you switch the map off. The idea comes from Toonidy's MIT-licensed "Nitro Type - Racing Mini Map" userscript; this is a separate, dependency-free implementation. If it can't find them, it falls back to its own estimate, marked with `~`. Cards for races, average/best WPM, average accuracy, total money and XP; a history table; and a **chart** of WPM per race (hover a point for details). Saved between visits.
 - **Notifications with a level per type** (Panel tab). Pick a level for each type:
   - **Off**: nothing.
@@ -31,6 +33,7 @@ A [Tampermonkey](https://www.tampermonkey.net/) userscript that types [Nitro Typ
   - Nitro Type says you're logged out;
   - you're disqualified twice in a row. After a single "Disqualified!" it notifies you and presses that popup's **Race Again** (never "Go To Your Garage").
 - **Stop when the screen locks** (Panel tab): uses Chrome's Idle Detection, which asks for permission once, so a session doesn't keep running when you lock your computer and walk away.
+- **Themes**: Dark, Midnight, Light, or Auto (follows your system), plus six accent colours, in the Panel tab. The pop-ups and charts follow them too.
 - **Simple by default**: the panel shows just speed, accuracy, the Human touch, nitros, races to run, the mini track and Start, in three small groups. A badge next to the status says what's going on at a glance: Idle, Waiting, Typing, Break, Captcha or Done. Flip the **Advanced** switch at the bottom for every other setting plus the Stats and Panel tabs.
 - **Mini track**: a little car drives along a lane to a checkered finish as the race goes on, with a dot for each other racer.
 - **Other racers**: while racing, live standings (position, name, progress, WPM) under the track. After the race, a **result card**: your place badge (gold, silver or bronze), WPM, accuracy, money, XP and nitros, plus the final standings. Both show in the focus view too.
@@ -80,7 +83,7 @@ If you had pasted an older version in by hand, open the install link once; Tampe
 
 1. On the **Race** tab, set the speed and accuracy ranges, nitros per race, races to run, and long breaks if you want them.
 2. Press **Start** (or `Alt+Shift+A`) on the race page. It waits for GO, types, and moves on to the next race until the count is done.
-3. The **Stats** tab shows how it went. The **Panel** tab has opacity, a reset for position and size, notifications, and the debug view.
+3. The **Stats** tab shows how it went. The **Panel** tab has the theme and accent colour, opacity, a reset for position and size, notifications, and the debug view.
 
 ## How it works
 

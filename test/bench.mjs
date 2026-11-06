@@ -23,7 +23,7 @@ const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
 await context.route("https://www.nitrotype.com/**", (r) => r.fulfill({ contentType: "text/html", body: mock }));
 await context.addInitScript((lite) => {
-  localStorage.setItem("nt-autotyper-settings", JSON.stringify({ wpmMin: 120, wpmMax: 120, accMin: 97, accMax: 97, races: 1, lite }));
+  localStorage.setItem("nt-autotyper-settings", JSON.stringify({ wpmMin: 120, wpmMax: 120, accMin: 97, accMax: 97, races: 1, lite, offDays: false }));
 }, mode === "lite");
 if (script) await context.addInitScript({ content: script });
 const page = await context.newPage();
