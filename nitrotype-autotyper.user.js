@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.14.0
+// @version      3.15.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.14.0";
+  const VERSION = "3.15.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -2888,6 +2888,7 @@
     .title small { color: var(--sub); font-weight: 500; margin-left: 6px; }
     .icon { all: unset; cursor: pointer; color: var(--sub); padding: 2px 6px; border-radius: 6px; font-size: 14px; }
     .icon:hover { color: var(--text); background: rgba(255, 255, 255, .08); }
+    .icon.on { color: var(--accent); }
     .main { display: flex; flex-direction: column; min-height: 0; flex: 1; }
     .collapsed .main { display: none; }
     .live { padding: 10px 12px 8px; border-bottom: 1px solid var(--line); flex: none; }
@@ -3243,6 +3244,7 @@
       <header>
         <span class="dot"></span>
         <span class="title">NT Autotyper<small class="count"></small></span>
+        <button class="icon mini-btn" title="Mini status window: a tiny window that stays on top of everything, for a corner of your screen">⧉</button>
         <button class="icon focus-btn" title="Focus view (full screen)">⛶</button>
         <button class="icon compact-btn" title="Compact mode">⊟</button>
         <button class="icon collapse" title="Collapse">▾</button>
@@ -3596,6 +3598,115 @@
     }
     panel.closeFocus = () => setFocusView(false);
 
+    // ---- what's going on, in a word or two (badge and mini window) ---------
+    // [badge class, badge text, mini window text]
+    function stateNow() {
+      const statuses = [...panel.statuses.values()].sort((a, b) => a.at - b.at);
+      // Typing for real (has progress), not just waiting for GO.
+      const typing = Boolean(statuses.filter((s) => s.running && s.len).pop());
+      const msg = session.message;
+      if (session.paused()) return ["paused", "Captcha", "Captcha!"];
+      if (session.onBreak()) return ["break", "Break", "Taking a break"];
+      if (session.state.active && session.reconnectTimer) return ["waiting", "Waiting", msg.includes("logged out") ? "Logged out · reconnecting" : "Reconnecting"];
+      if (typing) return ["typing", "Typing", "Racing"];
+      if (session.state.active) return ["waiting", "Waiting", "Waiting for race"];
+      if (alarm.on) {
+        const badge = ALARMS[alarm.kind]?.badge ?? "Captcha";
+        return ["paused", badge, badge];
+      }
+      if (msg.startsWith("Done")) return ["done", "Done", "Done"];
+      if (msg.startsWith("Stopped: you're logged out")) return ["paused", "Logged out", "Logged out"];
+      if (msg.startsWith("Stopped: no race")) return ["paused", "Stuck", "Stuck"];
+      if (msg.startsWith("Stopped")) return ["idle", "Idle", "Stopped"];
+      return ["idle", "Idle", "Idle"];
+    }
+
+    // ---- mini status window --------------------------------------------------
+    // A tiny always-on-top window (Chrome/Edge "Document Picture-in-Picture")
+    // with just the status, for a corner of the screen. It belongs to this
+    // tab: it closes when the page reloads, and comes back with your next
+    // click on the page.
+    const MINI_CSS = `
+      html, body { margin: 0; height: 100%; background: #10152a; }
+      body { display: flex; align-items: center; justify-content: center; overflow: hidden; user-select: none;
+        font: 600 15px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: #e8edff; }
+      .m { display: flex; align-items: center; gap: 9px; padding: 0 12px; white-space: nowrap; }
+      .m i { width: 10px; height: 10px; border-radius: 50%; background: #6b7aa8; flex: none; }
+      body.typing .m i { background: #3ddc84; box-shadow: 0 0 0 3px rgba(61, 220, 132, .25); }
+      body.waiting .m i { background: #f5c451; }
+      body.break .m i { background: #9cc3ff; }
+      body.done .m i { background: #3ddc84; }
+      body.paused { background: #4a1520; animation: alert 1s steps(2, jump-none) infinite; }
+      body.paused .m i { background: #ff5c6c; }
+      @keyframes alert { 50% { background: #10152a; } }
+      @media (prefers-reduced-motion: reduce) { body.paused { animation: none; } }
+    `;
+    const mini = { win: null, unloading: false };
+    listen(window, "pagehide", () => (mini.unloading = true));
+    function updateMini() {
+      const win = mini.win;
+      if (!win) return;
+      const [cls, , text] = stateNow();
+      const doc = win.document;
+      if (doc.body.className !== cls) doc.body.className = cls;
+      const span = doc.querySelector(".m span");
+      if (span && span.textContent !== text) span.textContent = text;
+      if (doc.title !== text) doc.title = text;
+    }
+    async function openMini() {
+      if (mini.win) return;
+      if (!("documentPictureInPicture" in window)) {
+        panel.toast?.("high", "Mini window not available", "It needs Chrome or Edge, version 116 or newer.");
+        return;
+      }
+      let win;
+      try {
+        win = await window.documentPictureInPicture.requestWindow({ width: 200, height: 44 });
+      } catch (err) {
+        panel.toast?.("high", "Couldn't open the mini window", String(err?.message ?? err));
+        return;
+      }
+      mini.win = win;
+      ui.mini = true;
+      saveUI();
+      const doc = win.document;
+      const style = doc.createElement("style");
+      style.textContent = MINI_CSS;
+      doc.head.appendChild(style);
+      const box = doc.createElement("div");
+      box.className = "m";
+      box.append(doc.createElement("i"), doc.createElement("span"));
+      doc.body.appendChild(box);
+      win.addEventListener("pagehide", () => {
+        mini.win = null;
+        // Closed by you (not by this page reloading): stays closed.
+        if (!mini.unloading) {
+          ui.mini = false;
+          saveUI();
+        }
+        $(".mini-btn").classList.remove("on");
+      });
+      $(".mini-btn").classList.add("on");
+      updateMini();
+    }
+    $(".mini-btn").addEventListener("click", () => {
+      $(".mini-btn").blur();
+      if (mini.win) mini.win.close();
+      else openMini();
+    });
+    // Kept up to date even while this tab is in the background.
+    timers.every(() => updateMini(), 1000);
+    // It was open before the page reloaded: a window needs a click to open,
+    // so the next click anywhere on the page brings it back.
+    if (ui.mini) {
+      const again = (e) => {
+        if (!e.isTrusted || mini.win) return;
+        window.removeEventListener("pointerdown", again, true);
+        openMini();
+      };
+      listen(window, "pointerdown", again, true);
+    }
+
     // ---- pop-ups inside the page -----------------------------------------
     const toastBox = $(".toasts");
     panel.clearToasts = (match) => {
@@ -3946,19 +4057,8 @@
       box.classList.toggle("alarm", alarm.on); // captcha: red panel
       box.classList.toggle("paused", session.paused());
       // The badge: what the script is up to, at a glance.
-      const [badgeClass, badgeText] = session.paused()
-        ? ["paused", "Captcha"]
-        : session.onBreak()
-          ? ["break", "Break"]
-          : typing
-            ? ["typing", "Typing"]
-            : active
-              ? ["waiting", "Waiting"]
-              : alarm.on
-                ? ["paused", ALARMS[alarm.kind]?.badge ?? "Captcha"]
-                : session.message.startsWith("Done")
-                  ? ["done", "Done"]
-                  : ["idle", "Idle"];
+      const [badgeClass, badgeText] = stateNow();
+      updateMini();
       const badge = $(".badge");
       if (badge.className !== `badge ${badgeClass}`) badge.className = `badge ${badgeClass}`;
       setText(badge, badgeText);

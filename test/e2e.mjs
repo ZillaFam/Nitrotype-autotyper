@@ -408,6 +408,98 @@ try {
     await context.close();
   });
 
+  await test("mini status window", async (name) => {
+    const { context, page } = await open("?countdown=800", { ...BASE, wpmMin: 120, wpmMax: 120, races: 1 }, { advanced: false }, () => {
+      // A stand-in for Chrome's always-on-top window: an iframe on the page.
+      const fake = {
+        async requestWindow(opts) {
+          window.__pipOpts = opts;
+          const f = document.createElement("iframe");
+          f.id = "fake-pip";
+          f.style.cssText = "position:fixed;right:0;top:0;width:200px;height:44px;border:0;z-index:2147483647";
+          document.body.appendChild(f);
+          const w = f.contentWindow;
+          w.close = () => {
+            w.dispatchEvent(new Event("pagehide"));
+            f.remove();
+          };
+          return w;
+        },
+      };
+      // (the real one is read-only)
+      Object.defineProperty(window, "documentPictureInPicture", { value: fake, configurable: true });
+    });
+    const pipText = () => page.frameLocator("#fake-pip").locator(".m span").textContent();
+    const pipClass = () => page.evaluate(() => document.getElementById("fake-pip").contentDocument.body.className);
+    await page.locator(".mini-btn").click();
+    await page.waitForTimeout(300);
+    const opts = await page.evaluate(() => window.__pipOpts);
+    check(`${name}: opens small`, opts && opts.width <= 220 && opts.height <= 60, JSON.stringify(opts));
+    check(`${name}: idle`, (await pipText()) === "Idle");
+    await page.locator(".go").click();
+    await page.waitForTimeout(400);
+    check(`${name}: waiting for race`, (await pipText()) === "Waiting for race", await pipText());
+    await page.waitForTimeout(2500);
+    check(`${name}: racing`, (await pipText()) === "Racing" && (await pipClass()) === "typing", await pipText());
+    if (shotDir) await page.locator("#fake-pip").screenshot({ path: path.join(shotDir, "mini-racing.png") });
+    await waitForResults(page, 1);
+    await page.waitForTimeout(1500);
+    check(`${name}: done`, (await pipText()) === "Done", await pipText());
+    check(`${name}: remembered as open`, (await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-ui")).mini)) === true);
+    // Reload: the window goes with the page; the next click brings it back.
+    await page.reload();
+    await page.waitForSelector(".go");
+    check(`${name}: gone after a reload`, (await page.locator("#fake-pip").count()) === 0);
+    await page.mouse.click(600, 300);
+    await page.waitForTimeout(400);
+    check(`${name}: back after the next click`, (await page.locator("#fake-pip").count()) === 1 && (await pipText()) === "Idle", await pipText().catch(() => "none"));
+    // Closed by you: stays closed.
+    await page.locator(".mini-btn").click();
+    await page.waitForTimeout(200);
+    check(`${name}: ⧉ closes it`, (await page.locator("#fake-pip").count()) === 0 && (await page.evaluate(() => JSON.parse(localStorage.getItem("nt-autotyper-ui")).mini)) === false);
+    await context.close();
+  });
+
+  await test("mini status window: logged out and break", async (name) => {
+    const { context, page } = await open("?logout=after1&countdown=300", { ...BASE, wpmMin: 180, wpmMax: 180, races: 3 }, null, () => {
+      // A stand-in for Chrome's always-on-top window: an iframe on the page.
+      const fake = {
+        async requestWindow(opts) {
+          window.__pipOpts = opts;
+          const f = document.createElement("iframe");
+          f.id = "fake-pip";
+          f.style.cssText = "position:fixed;right:0;top:0;width:200px;height:44px;border:0;z-index:2147483647";
+          document.body.appendChild(f);
+          const w = f.contentWindow;
+          w.close = () => {
+            w.dispatchEvent(new Event("pagehide"));
+            f.remove();
+          };
+          return w;
+        },
+      };
+      // (the real one is read-only)
+      Object.defineProperty(window, "documentPictureInPicture", { value: fake, configurable: true });
+    });
+    await page.locator(".mini-btn").click();
+    await page.locator(".go").click();
+    // It ends up on the login page (the window closes with the old page); a click brings it back.
+    const said = await waitForStatus(page, "Stopped: you're logged out", 60000);
+    await page.mouse.click(600, 300);
+    await page.waitForTimeout(500);
+    check(`${name}: says Logged out, flashing red`, said.startsWith("Stopped") && (await page.frameLocator("#fake-pip").locator(".m span").textContent()) === "Logged out" && (await page.evaluate(() => document.getElementById("fake-pip").contentDocument.body.className)) === "paused");
+    await context.close();
+  });
+
+  await test("mini status window: not in this browser", async (name) => {
+    const { context, page } = await open("", { ...BASE }, null, () => delete Window.prototype.documentPictureInPicture && delete window.documentPictureInPicture);
+    await page.locator(".mini-btn").click();
+    await page.waitForTimeout(300);
+    const toasts = await page.locator(".toast").allTextContents();
+    check(`${name}: says what it needs`, toasts.some((t) => t.startsWith("Mini window not available")), toasts.join(" | "));
+    await context.close();
+  });
+
   await test("looks: themes and accent colours", async (name) => {
     const { context, page } = await open("", { ...BASE }, { advanced: true, tab: "panel" });
     const host = () => page.evaluate(() => {
