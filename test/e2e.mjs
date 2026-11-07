@@ -492,6 +492,54 @@ try {
     await context.close();
   });
 
+  await test("desktop helper: reports name and status", async (name) => {
+    const { context, page } = await open("?countdown=800", { ...BASE, wpmMin: 120, wpmMax: 120, races: 1, helper: true }, { advanced: true, tab: "panel" });
+    const posts = [];
+    // A stand-in for the helper app on 127.0.0.1.
+    await context.route("http://127.0.0.1:47321/**", (route) => {
+      posts.push(JSON.parse(route.request().postData() || "{}"));
+      route.fulfill({ status: 200, contentType: "application/json", headers: { "Access-Control-Allow-Origin": "*" }, body: '{"ok":true}' });
+    });
+    await page.waitForTimeout(2500);
+    check(`${name}: says it's connected`, (await page.locator(".helper-state").textContent()) === "Helper: connected ✓", await page.locator(".helper-state").textContent());
+    await page.locator(".go").click();
+    await page.waitForTimeout(3500);
+    const racing = posts.filter((p) => p.status === "Racing");
+    check(`${name}: sends the account and its status`, racing.length > 0 && racing[0].name === "racer_me" && racing[0].tone === "typing" && /^[a-z0-9]{6,}$/.test(racing[0].id), JSON.stringify(posts.slice(-2)));
+    await waitForResults(page, 1);
+    await page.waitForTimeout(3000);
+    check(`${name}: then Done`, posts[posts.length - 1].status === "Done", JSON.stringify(posts[posts.length - 1]));
+    check(`${name}: the same id every time`, new Set(posts.map((p) => p.id)).size === 1);
+    await context.close();
+  });
+
+  // The helper app itself (its server part; the window needs a screen).
+  await test("desktop helper app", async (name) => {
+    const { spawn } = await import("node:child_process");
+    const helper = spawn("python3", [path.join(root, "helper/nt-status.pyw"), "--headless"], { stdio: "ignore" });
+    try {
+      await new Promise((r) => setTimeout(r, 1200));
+      const post = (body, origin = "https://www.nitrotype.com") =>
+        fetch("http://127.0.0.1:47321/status", { method: "POST", headers: { "Content-Type": "text/plain", Origin: origin }, body: JSON.stringify(body) });
+      const ok = await post({ id: "a1", name: "account_one", status: "Racing", tone: "typing" });
+      await post({ id: "b2", name: "account_two", status: "Taking a break", tone: "break" });
+      const evil = await post({ id: "x", name: "x", status: "x" }, "https://example.com");
+      const rows = await (await fetch("http://127.0.0.1:47321/statuses")).json();
+      check(`${name}: takes reports from Nitro Type pages`, ok.status === 200 && rows.length === 2 && rows[0].name === "account_one" && rows[0].status === "Racing" && rows[1].status === "Taking a break", JSON.stringify(rows));
+      check(`${name}: refuses other sites`, evil.status === 403);
+    } finally {
+      helper.kill();
+    }
+  });
+
+  await test("desktop helper: not running", async (name) => {
+    const { context, page } = await open("", { ...BASE, helper: true }, { advanced: true, tab: "panel" });
+    await context.route("http://127.0.0.1:47321/**", (route) => route.abort("connectionrefused"));
+    await page.waitForTimeout(2500);
+    check(`${name}: says so`, (await page.locator(".helper-state").textContent()).startsWith("Helper: not found"), await page.locator(".helper-state").textContent());
+    await context.close();
+  });
+
   await test("mini status window: not in this browser", async (name) => {
     const { context, page } = await open("", { ...BASE }, null, () => delete Window.prototype.documentPictureInPicture && delete window.documentPictureInPicture);
     await page.locator(".mini-btn").click();

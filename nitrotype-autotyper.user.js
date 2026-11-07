@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.15.1
+// @version      3.16.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.15.1";
+  const VERSION = "3.16.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -1080,6 +1080,15 @@
 
     tick() {
       listenToServer(); // early, so the countdown signal isn't missed
+      // Your username, as soon as the page has it (not only when a race starts).
+      if (!this.playerSent && Date.now() - (this.playerCheckAt ?? 0) > 5000) {
+        this.playerCheckAt = Date.now();
+        const player = myUsername();
+        if (player) {
+          this.playerSent = true;
+          toTop({ kind: "player", name: player });
+        }
+      }
       // Logged out, at any point in a session (breaks and pauses too), even
       // if Nitro Type sent you to the login page.
       if (this.live && !this.running && Date.now() - (this.loginCheckAt ?? 0) > 1000) {
@@ -1855,8 +1864,9 @@
     lite: false, // Low-FPS mode: fewer panel updates, no animations
     miniMap: true, // show a mini map in place of Nitro Type's race track
     keepAlive: true, // keep Nitro Type's page running while minimised (during a session)
+    helper: false, // send the status to the desktop helper (helper/nt-status.pyw)
   };
-  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap", "keepAlive", "alarmSound", "notifySound", "offDays"];
+  const BOOLEAN_SETTINGS = ["notify", "debug", "notifyRace", "notifyLevel", "notifySeason", "notifySession", "notifyMilestone", "notifyCaptcha", "stopOnLock", "lite", "notifyAlways", "miniMap", "keepAlive", "alarmSound", "notifySound", "offDays", "helper"];
   const LIMITS = {
     wpmMin: [10, 300], wpmMax: [10, 300], accMin: [80, 100], accMax: [80, 100], variance: [0, 60],
     nitros: [0, 10], races: [1, 500], breakEvery: [0, 100], breakLenMin: [0.1, 30], breakLenMax: [0.1, 30],
@@ -3244,7 +3254,7 @@
       <header>
         <span class="dot"></span>
         <span class="title">NT Autotyper<small class="count"></small></span>
-        <button class="icon mini-btn" title="Mini status window: a tiny window that stays on top of everything, for a corner of your screen">⧉</button>
+        <button class="icon mini-btn" title="Mini status window: a tiny window that stays on top of everything, for a corner of your screen (one at a time in Chrome; for several accounts, see the desktop helper in the Panel tab)">⧉</button>
         <button class="icon focus-btn" title="Focus view (full screen)">⛶</button>
         <button class="icon compact-btn" title="Compact mode">⊟</button>
         <button class="icon collapse" title="Collapse">▾</button>
@@ -3383,6 +3393,7 @@
             <label class="check"><input type="checkbox" data-k="miniMap"><span>Mini map instead of the race track<small>A light five-lane map of every racer, in place of Nitro Type's track.</small></span></label>
             <label class="check"><input type="checkbox" data-k="lite"><span>Low-FPS mode<small>For slow computers: no animations, no live standings, and the panel updates once a second.</small></span></label>
             <button class="btn2 reset-panel">Reset position and size</button>
+            <label class="check"><input type="checkbox" data-k="helper"><span>Send status to the desktop helper<small>For several accounts (one per Chrome profile): the helper app shows them all in one small box in the corner of your screen. Turn this on in each profile, and run helper/nt-status.pyw from the project page. <b class="helper-state"></b></small></span></label>
             <hr class="sep">
             <label class="check"><input type="checkbox" data-k="notify"><span>Notifications<small class="notify-hint">Every time: a system pop-up, plus a pop-up on this page (seen even in full screen).</small></span></label>
             <div class="sub-checks">
@@ -3714,6 +3725,51 @@
       };
       listen(window, "pointerdown", again, true);
     }
+
+    // ---- desktop helper: one box for several accounts -------------------------
+    // Each Chrome profile is walled off from the others (and Chrome allows one
+    // mini window in all), so the accounts meet in a small app on this
+    // computer: helper/nt-status.pyw, listening on 127.0.0.1 only.
+    const HELPER_URL = "http://127.0.0.1:47321/status";
+    let helperId = readJSON(localStorage, "nt-autotyper-id", "");
+    if (!helperId) {
+      helperId = Math.random().toString(36).slice(2, 12);
+      writeJSON(localStorage, "nt-autotyper-id", helperId);
+    }
+    let helperState = "";
+    function setHelperState(text) {
+      if (text === helperState) return;
+      helperState = text;
+      setText($(".helper-state"), text);
+    }
+    let helperBusy = false;
+    async function reportToHelper() {
+      if (!settings.helper) return setHelperState("");
+      if (helperBusy) return;
+      helperBusy = true;
+      const [tone, , status] = stateNow();
+      try {
+        const res = await fetch(HELPER_URL, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" }, // a "simple" request: no preflight
+          body: JSON.stringify({ id: helperId, name: session.player || "Nitro Type", status, tone }),
+        });
+        setHelperState(res.ok ? "Helper: connected ✓" : `Helper: answered ${res.status}`);
+      } catch {
+        // Chrome asks once per profile before a page may reach apps on this
+        // computer ("local network access"). Blocked: say how to allow it.
+        const access = await navigator.permissions?.query({ name: "local-network-access" }).then((p) => p.state, () => "");
+        setHelperState(
+          access === "denied"
+            ? "Helper: Chrome is blocking it. Click the icon left of the address bar → Local network access → Allow, then reload."
+            : "Helper: not found. Is it running? (Chrome may ask once to allow local network access: allow it.)",
+        );
+      } finally {
+        helperBusy = false;
+      }
+    }
+    // Every 2 s, even in a background tab.
+    timers.every(() => reportToHelper(), 2000);
 
     // ---- pop-ups inside the page -----------------------------------------
     const toastBox = $(".toasts");
