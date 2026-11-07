@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.13.2
+// @version      3.14.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.13.2";
+  const VERSION = "3.14.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -869,6 +869,10 @@
   // Logged out (Nitro Type's race state says so): racing on would be as a
   // guest, with nothing saved.
   const loggedOut = () => raceComponent()?.props?.user?.loggedIn === false;
+  // Sent to the login page, or a login box on screen (a visible password field).
+  const onLoginPage = () =>
+    /^\/(?:login|log-in|signin|sign-in|signup|sign-up|register)\b/i.test(location.pathname) ||
+    [...document.querySelectorAll('input[type="password"]')].some((el) => el.getClientRects().length);
 
   // A jump this big in the clock between two steps means the computer was
   // asleep (lid closed, shut down with the tab restored, ...). Without the
@@ -1076,6 +1080,12 @@
 
     tick() {
       listenToServer(); // early, so the countdown signal isn't missed
+      // Logged out, at any point in a session (breaks and pauses too), even
+      // if Nitro Type sent you to the login page.
+      if (this.live && !this.running && Date.now() - (this.loginCheckAt ?? 0) > 1000) {
+        this.loginCheckAt = Date.now();
+        if (onLoginPage() || (!this.armed && loggedOut())) return void toTop({ kind: "loggedOut" });
+      }
       if (this.watchCaptcha && !this.armed) {
         // Paused for a captcha: keep telling the session whether it's there.
         const now = Date.now();
@@ -1592,7 +1602,9 @@
     refreshPage() {
       if (!IS_TOP || this.running) return;
       LOG("loading a fresh race page");
-      location.reload();
+      // Somewhere else (the login page, the garage...): go to the race page.
+      if (!/^\/race\b/i.test(location.pathname)) location.href = "/race";
+      else location.reload();
     },
 
     reloadRace() {
@@ -1838,7 +1850,7 @@
     notifyRace: true, notifyLevel: true, notifySeason: true, notifySession: true, notifyMilestone: true, notifyCaptcha: true,
     // How each notification type is delivered: off, low (chime), normal
     // (pop-up), high (chime + pop-up), urgent (alarm + pop-up that stays).
-    levelRace: "low", levelLevel: "normal", levelSeason: "normal", levelMilestone: "high", levelSession: "high", levelCaptcha: "urgent", levelProblem: "high",
+    levelRace: "low", levelLevel: "normal", levelSeason: "normal", levelMilestone: "high", levelSession: "high", levelCaptcha: "urgent", levelLoggedOut: "urgent", levelProblem: "high",
     stopOnLock: false, // stop the session when the computer's screen locks
     lite: false, // Low-FPS mode: fewer panel updates, no animations
     miniMap: true, // show a mini map in place of Nitro Type's race track
@@ -1883,6 +1895,8 @@
     milestone: { level: "levelMilestone", old: "notifyMilestone", title: "★ Milestone" },
     session: { level: "levelSession", old: "notifySession", title: "NT Autotyper session" },
     captcha: { level: "levelCaptcha", old: "notifyCaptcha", title: "⚠ CAPTCHA: session paused" },
+    // Logged out (or the session stuck with no races): the session stopped.
+    loggedOut: { level: "levelLoggedOut", old: "notifyLoggedOut", title: "⚠ LOGGED OUT" },
     // Disqualified, logged out, computer asleep, keys not accepted, ...
     problem: { level: "levelProblem", old: "notifySession", title: "⚠ NT Autotyper" },
   };
@@ -1946,6 +1960,7 @@
       if (this.state.paused) this.captchaSeenAt = Date.now();
       this.stats = readJSON(localStorage, KEYS.stats, []);
       this.days = readJSON(localStorage, KEYS.days, {});
+      this.lastActivity = Date.now(); // a fresh page: give it time
       // Chrome restores a tab's session storage after a restart, a crash or
       // sleep. A session whose last heartbeat is old was interrupted: end it
       // instead of picking up typing again.
@@ -1974,12 +1989,22 @@
       }
       this.state.beat = now;
       this.save();
+      // A session that's gone quiet (no race at all, not on a break or a
+      // captcha pause): something's wrong. Reload; if that doesn't help, stop
+      // and sound the alarm.
+      if (this.onBreak() || this.paused() || this.reconnectTimer) this.lastActivity = now;
+      else if (now - (this.lastActivity ?? now) > stallMs()) this.reconnect("stalled");
+    },
+    // Something happened (a race showed up, finished, a popup was handled).
+    touch() {
+      this.lastActivity = Date.now();
     },
     // Nitro Type's "Currently in a Race": you're still in an earlier race
     // (left before it ended). It disqualifies you from that one, then lets
     // you race again. The engine waits, then presses Try Again.
     stuck(waitSec) {
       if (!this.state.active) return;
+      this.touch();
       const now = Date.now();
       this.stuckAt = now;
       timers.clear(this.fallbackTimer); // never reload now: that makes it worse
@@ -1996,6 +2021,7 @@
     },
     disqualified() {
       if (!this.state.active) return;
+      this.touch();
       // Right after "Currently in a Race": that's the old race ending. Expected,
       // so it doesn't count toward "disqualified twice in a row".
       if (Date.now() - (this.stuckAt ?? 0) < 5 * 60000) {
@@ -2041,7 +2067,13 @@
       const recent = (this.state.reconnects ?? []).filter((t) => now - t < 30 * 60000);
       // Still logged out right after a fresh page: you really are logged out.
       if (why === "loggedOut" && recent.some((t) => now - t < 2 * 60000)) {
-        this.stop("Stopped: you're logged out of Nitro Type. Log back in, then press Start.");
+        this.stop(LOGGED_OUT_TEXT, { silent: true });
+        alarm.start("loggedOut"); // urgent: beeps, a pop-up that stays, a flashing tab title
+        return;
+      }
+      if (why === "stalled" && recent.some((t) => now - t < 15 * 60000)) {
+        this.stop("Stopped: no race for 10 minutes, even after reloading. Logged out? A popup in the way?", { silent: true });
+        alarm.start("stalled");
         return;
       }
       if (recent.length >= 4) {
@@ -2052,10 +2084,13 @@
       this.save();
       timers.clear(this.nextTimer);
       timers.clear(this.fallbackTimer);
+      this.lastActivity = now;
       const message =
         why === "loggedOut"
           ? "Nitro Type shows you as logged out. Reloading the race page to reconnect (your login itself is untouched)…"
-          : "Nitro Type dropped the connection. Reloading the race page to reconnect…";
+          : why === "stalled"
+            ? "No race for 5 minutes. Loading the race page again…"
+            : "Nitro Type dropped the connection. Reloading the race page to reconnect…";
       this.say(message);
       notify("problem", message, { title: "Reconnecting" });
       this.reconnectTimer = timers.set(() => {
@@ -2076,6 +2111,7 @@
       alarm.stop();
       alarm.unlock(); // Start is a click: the browser lets the alarm sound later
       this.dqInARow = 0;
+      this.touch();
       this.state = { active: true, total: s.races, done: 0, sinceBreak: 0, breakAfter: this.pickBreakAfter(s), breakUntil: 0, paused: "", startAt: Date.now(), beat: Date.now() };
       this.save();
       this.sync();
@@ -2205,8 +2241,10 @@
     },
     raceStarted() {
       timers.clear(this.fallbackTimer);
+      this.touch();
     },
     raceDone(result) {
+      this.touch();
       this.dqInARow = 0;
       this.stats.push(result);
       if (this.stats.length > 300) {
@@ -2435,6 +2473,28 @@
   const CAPTCHA_TEXT_BODY = "Nitro Type is asking for a captcha. The session is paused: solve it yourself, and it carries on by itself.";
   const CAPTCHA_PAUSED = "Paused: solve the captcha and I'll carry on by myself";
   const CAPTCHA_GONE_MS = 2500; // the captcha has to stay gone this long
+  const LOGGED_OUT_TEXT = "Stopped: you're logged out of Nitro Type. Log back in, then press Start.";
+  // The alarms: what they say, and how the tab title flashes.
+  const ALARMS = {
+    captcha: { type: "captcha", body: () => CAPTCHA_TEXT_BODY, test: "TEST: this is what a captcha alert looks like.", flash: ["⚠ CAPTCHA", "■ Captcha"], badge: "Captcha" },
+    loggedOut: {
+      type: "loggedOut",
+      body: () => "Nitro Type logged you out, so the session stopped (it tried a fresh page first). Log back in, then press Start.",
+      test: "TEST: this is what the logged-out alert looks like.",
+      flash: ["⚠ LOGGED OUT", "■ Logged out"],
+      badge: "Logged out",
+    },
+    stalled: {
+      type: "loggedOut",
+      title: "⚠ SESSION STUCK",
+      body: () => "No race for 10 minutes, even after reloading the race page, so the session stopped. Check the tab (logged out? a popup?), then press Start.",
+      test: "TEST: this is what the stuck alert looks like.",
+      flash: ["⚠ STUCK", "■ Stuck"],
+      badge: "Stuck",
+    },
+  };
+  // No race at all for this long (not on a break or a captcha pause): reload.
+  const stallMs = () => window.__ntAutotyperStallMs ?? 5 * 60000;
   // Breaks at least this long end with a fresh race page, not Race Again.
   const longBreakMs = () => window.__ntAutotyperLongBreakMs ?? 2 * 60000;
   const alarm = {
@@ -2538,16 +2598,20 @@
         /* no sound, the rest still happens */
       }
     },
-    start(test = false) {
+    // start("captcha" | "loggedOut" | "stalled", { test })
+    start(which = "captcha", { test = false } = {}) {
+      if (typeof which === "boolean") [which, test] = ["captcha", which]; // start(true): the captcha test
+      const kind = ALARMS[which] ?? ALARMS.captcha;
       this.stop();
       this.on = true;
+      this.kind = which;
       this.count = 0;
       const ring = () => {
         if (!this.on) return;
         this.count++;
-        notify("captcha", test ? "TEST: this is what a captcha alert looks like." : CAPTCHA_TEXT_BODY, { always: true });
+        notify(kind.type, test ? kind.test : kind.body(), kind.title ? { title: kind.title } : {});
         // Urgent rings again every minute; lower levels alert once.
-        if (loadSettings().levelCaptcha === "urgent" && this.count < ALARM_MAX) this.timer = timers.set(ring, ALARM_REPEAT_MS);
+        if (loadSettings()[NOTIFY[kind.type].level] === "urgent" && this.count < ALARM_MAX) this.timer = timers.set(ring, ALARM_REPEAT_MS);
       };
       ring();
       // Flash the tab title.
@@ -2555,7 +2619,7 @@
       this.flashTimer = timers.set(function flash() {
         if (!alarm.on) return;
         flip = !flip;
-        titleFlash = flip ? "⚠ CAPTCHA" : "■ Captcha";
+        titleFlash = flip ? kind.flash[0] : kind.flash[1];
         updateTitle();
         alarm.flashTimer = timers.set(flash, 1000);
       }, 0);
@@ -2610,6 +2674,7 @@
   function topHandle(msg, source) {
     switch (msg.kind) {
       case "status":
+        if (msg.status?.running) session.touch(); // typing: all's well
         panel.statuses.set(source, { ...msg.status, at: Date.now() });
         panel.render();
         break;
@@ -3322,6 +3387,7 @@
               <div class="levels-hint">Low: chime · Normal: pop-up · High: chime + pop-up · Urgent: alarm + pop-up that stays</div>
               ${[
                 ["levelCaptcha", "captcha", "Captcha", "Session pauses, carries on once it's solved. Urgent repeats every minute."],
+                ["levelLoggedOut", "loggedOut", "Logged out / stuck", "Session stopped: logged out, or no race for 10 minutes. Urgent repeats every minute."],
                 ["levelProblem", "problem", "Problems", "Currently in a race, disqualified, logged out, asleep, stuck"],
                 ["levelSession", "session", "Session done", "Races, WPM, wins, money, XP"],
                 ["levelMilestone", "milestone", "Milestones", "Personal best, win streaks"],
@@ -3629,6 +3695,14 @@
         const type = btn.dataset.try;
         btn.blur();
         if (type === "captcha") return void $(".test-alarm").click();
+        if (type === "loggedOut") {
+          // The real thing: one ring, then it stops on its own.
+          if (alarm.on) return void alarm.stop();
+          alarm.start("loggedOut", { test: true });
+          timers.clear(alarm.timer);
+          timers.set(() => alarm.stop(), 6000);
+          return;
+        }
         const level = settings[NOTIFY[type].level];
         const status = $(".notify-status");
         if (level === "off") {
@@ -3881,7 +3955,7 @@
             : active
               ? ["waiting", "Waiting"]
               : alarm.on
-                ? ["paused", "Captcha"]
+                ? ["paused", ALARMS[alarm.kind]?.badge ?? "Captcha"]
                 : session.message.startsWith("Done")
                   ? ["done", "Done"]
                   : ["idle", "Idle"];

@@ -1008,8 +1008,120 @@ try {
       }, null, { timeout: 30000 })
       .then(() => true, () => false);
     check(`${name}: still logged out after the reload: stops`, stopped && (await status(page)) === "Stopped: you're logged out of Nitro Type. Log back in, then press Start.", await status(page));
+    check(`${name}: with the urgent alarm (red panel)`, (await page.locator(".box.alarm").count()) === 1);
     check(`${name}: reloaded once`, (await page.evaluate(() => window.__loads)) === 2);
     check(`${name}: nothing typed`, (await page.evaluate(() => document.querySelectorAll(".is-typed").length)) === 0);
+    await context.close();
+  });
+
+  // Waits for a status line on whatever page the tab ends up on.
+  async function waitForStatus(page, start, timeout = 60000) {
+    const end = Date.now() + timeout;
+    while (Date.now() < end) {
+      const s = await status(page).catch(() => "");
+      if (s.startsWith(start)) return s;
+      await page.waitForTimeout(500);
+    }
+    return status(page).catch(() => "");
+  }
+
+  await test("logged out (sent to the login page): urgent alarm", async (name) => {
+    const { context, page } = await open("?logout=after1&countdown=300", { ...BASE, wpmMin: 180, wpmMax: 180, races: 3, notify: true }, null, () => {
+      window.__notes = [];
+      window.__noteOpts = [];
+      window.__beeps = 0;
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+          window.__noteOpts.push({ title, ...opts });
+          setTimeout(() => this.onshow?.(), 30);
+        }
+        close() {}
+      };
+      window.AudioContext = class {
+        constructor() {
+          this.currentTime = 0;
+          this.destination = {};
+        }
+        resume() {}
+        createGain() {
+          return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: (x) => x };
+        }
+        createOscillator() {
+          return { frequency: {}, connect: (x) => x, start: () => window.__beeps++, stop() {} };
+        }
+      };
+    });
+    await page.evaluate(() => (document.title = "Nitro Type"));
+    await page.locator(".go").click();
+    const said = await waitForStatus(page, "Stopped: you're logged out", 60000);
+    check(`${name}: noticed on the login page, tried the race page again, then stopped`, said === "Stopped: you're logged out of Nitro Type. Log back in, then press Start.", said);
+    check(`${name}: ended up on the login page`, new URL(page.url()).pathname === "/login", page.url());
+    await page.waitForTimeout(1000);
+    const opts = await page.evaluate(() => window.__noteOpts);
+    const alert = opts.find((o) => o.title === "⚠ LOGGED OUT · racer_me");
+    check(`${name}: urgent notification (stays on screen, re-alerts)`, alert && alert.requireInteraction === true && alert.renotify === true, JSON.stringify(opts));
+    check(`${name}: alarm beeps`, (await page.evaluate(() => window.__beeps)) >= 3);
+    check(`${name}: red panel, badge says Logged out`, (await page.locator(".box.alarm").count()) === 1 && (await page.locator(".badge").textContent()) === "Logged out");
+    const titles = new Set();
+    for (let i = 0; i < 4; i++) {
+      titles.add((await page.title()).split(" · ")[0]);
+      await page.waitForTimeout(500);
+    }
+    check(`${name}: tab title flashes`, titles.has("⚠ LOGGED OUT") && titles.has("■ Logged out"), [...titles].join(" / "));
+    if (shotDir) await page.locator(".box").screenshot({ path: path.join(shotDir, "logged-out-alarm.png") });
+    await context.close();
+  });
+
+  await test("logged out alert test button", async (name) => {
+    const { context, page } = await open("", { ...BASE, notify: true }, { advanced: true, tab: "panel" }, () => {
+      window.__notes = [];
+      window.__noteOpts = [];
+      window.__beeps = 0;
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor(title, opts) {
+          window.__notes.push(`${title}: ${opts?.body}`);
+          window.__noteOpts.push({ title, ...opts });
+          setTimeout(() => this.onshow?.(), 30);
+        }
+        close() {}
+      };
+      window.AudioContext = class {
+        constructor() {
+          this.currentTime = 0;
+          this.destination = {};
+        }
+        resume() {}
+        createGain() {
+          return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: (x) => x };
+        }
+        createOscillator() {
+          return { frequency: {}, connect: (x) => x, start: () => window.__beeps++, stop() {} };
+        }
+      };
+    });
+    check(`${name}: its own row, Urgent by default`, (await page.locator('select[data-k="levelLoggedOut"]').inputValue()) === "urgent");
+    await page.locator('.try[data-try="loggedOut"]').click();
+    await page.waitForTimeout(400);
+    const notes = await page.evaluate(() => window.__notes);
+    check(`${name}: urgent test alert`, notes.length === 1 && notes[0] === "⚠ LOGGED OUT: TEST: this is what the logged-out alert looks like.", JSON.stringify(notes));
+    check(`${name}: panel turns red`, (await page.locator(".box.alarm").count()) === 1);
+    await page.waitForTimeout(6500);
+    check(`${name}: stops by itself`, (await page.locator(".box.alarm").count()) === 0);
+    await context.close();
+  });
+
+  await test("stuck somewhere with no race: back to the race page", async (name) => {
+    const { context, page } = await open("?strand=after1&countdown=300", { ...BASE, wpmMin: 180, wpmMax: 180, races: 2, notify: true }, null, () => (window.__ntAutotyperStallMs = 6000));
+    await page.locator(".go").click();
+    const said = await waitForStatus(page, "No race for 5 minutes", 40000);
+    check(`${name}: notices nothing's happening`, said.startsWith("No race for 5 minutes. Loading the race page again"), said);
+    const done = await waitForStatus(page, "Done", 60000);
+    check(`${name}: back on the race page, session finished`, done === "Done: 2 races" && new URL(page.url()).pathname === "/race", `${done} @ ${page.url()}`);
     await context.close();
   });
 

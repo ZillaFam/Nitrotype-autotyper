@@ -25,6 +25,10 @@
     captcha=1                                  a captcha appears mid-race, once (the race freezes); clicks on it are counted in window.__captchaClicks;
                                                window.__solveCaptcha() is you solving it (it goes away, the race goes on)
     status=none                                no "status" events (countdown / racing) from the race server
+    logout=after1                              logged out 2 s after the first race: sent to /login (a login page), and
+                                               /race sends you back there from then on (sessionStorage "mock-loggedout")
+    strand=after1                              2 s after the first race, ends up on /garage (no race there), once
+  Other paths: /login is a login page (a password field), /garage an empty page.
     idlekick=1                                 like a server that drops idle connections: the page sends a heartbeat on a
                                                page timer (every 1 s); 5 s without one and you're disconnected (popup,
                                                logged out, Race Again stops working). Counted in sessionStorage "mock-kicks".
@@ -68,6 +72,20 @@
   </head>
   <body>
     <script>
+      // Not the race page: a login page, or the garage (nothing to race).
+      if (location.pathname.startsWith("/race") && sessionStorage.getItem("mock-loggedout")) {
+        window.__notRace = true;
+        location.replace("/login");
+      } else if (location.pathname.startsWith("/login")) {
+        window.__notRace = true;
+        document.write(`<h1>Log In</h1><form><input name="user" placeholder="Username"><input type="password" name="pass" placeholder="Password"><button type="button">Log In</button></form>`);
+      } else if (location.pathname.startsWith("/garage")) {
+        window.__notRace = true;
+        document.write(`<h1>Garage</h1><p>Your cars.</p>`);
+      }
+    </script>
+    <script>
+      if (window.__notRace) throw new Error("mock: not a race page");
       const params = new URLSearchParams(location.search);
       if (params.get("frame") === "1") {
         params.delete("frame");
@@ -402,6 +420,14 @@
                  ${extras.join("")}
                </div>`;
           setTimeout(() => after.prepend(box), 600);
+          if (params.get("logout") === "after1") {
+            sessionStorage.setItem("mock-loggedout", "1");
+            setTimeout(() => (location.href = "/login"), 2000);
+          }
+          if (params.get("strand") === "after1" && !sessionStorage.getItem("mock-stranded")) {
+            sessionStorage.setItem("mock-stranded", "1");
+            setTimeout(() => (location.href = "/garage"), 2000);
+          }
           if (params.get("idlekick") === "once" && !sessionStorage.getItem("mock-kicked-once")) {
             sessionStorage.setItem("mock-kicked-once", "1");
             setTimeout(kick, 2000);
