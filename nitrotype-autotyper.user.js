@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.15.0
+// @version      3.15.1
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.15.0";
+  const VERSION = "3.15.1";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -3630,7 +3630,11 @@
       html, body { margin: 0; height: 100%; background: #10152a; }
       body { display: flex; align-items: center; justify-content: center; overflow: hidden; user-select: none;
         font: 600 15px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: #e8edff; }
-      .m { display: flex; align-items: center; gap: 9px; padding: 0 12px; white-space: nowrap; }
+      .m { display: flex; align-items: center; gap: 9px; padding: 0 12px; white-space: nowrap; width: 100%; box-sizing: border-box; }
+      /* which account: several can run (one per Chrome profile), each with its own window */
+      .m b { font-weight: 500; color: #8e9cc9; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+      .m span { margin-left: auto; flex: none; }
+      body.paused .m b { color: #ffd0d5; }
       .m i { width: 10px; height: 10px; border-radius: 50%; background: #6b7aa8; flex: none; }
       body.typing .m i { background: #3ddc84; box-shadow: 0 0 0 3px rgba(61, 220, 132, .25); }
       body.waiting .m i { background: #f5c451; }
@@ -3651,7 +3655,11 @@
       if (doc.body.className !== cls) doc.body.className = cls;
       const span = doc.querySelector(".m span");
       if (span && span.textContent !== text) span.textContent = text;
-      if (doc.title !== text) doc.title = text;
+      // The account's Nitro Type username, to tell several windows apart.
+      const name = session.player || "Nitro Type";
+      const label = doc.querySelector(".m b");
+      if (label && label.textContent !== name) label.textContent = name;
+      if (doc.title !== `${name}: ${text}`) doc.title = `${name}: ${text}`;
     }
     async function openMini() {
       if (mini.win) return;
@@ -3661,7 +3669,7 @@
       }
       let win;
       try {
-        win = await window.documentPictureInPicture.requestWindow({ width: 200, height: 44 });
+        win = await window.documentPictureInPicture.requestWindow({ width: 240, height: 40 });
       } catch (err) {
         panel.toast?.("high", "Couldn't open the mini window", String(err?.message ?? err));
         return;
@@ -3675,7 +3683,7 @@
       doc.head.appendChild(style);
       const box = doc.createElement("div");
       box.className = "m";
-      box.append(doc.createElement("i"), doc.createElement("span"));
+      box.append(doc.createElement("i"), doc.createElement("b"), doc.createElement("span"));
       doc.body.appendChild(box);
       win.addEventListener("pagehide", () => {
         mini.win = null;

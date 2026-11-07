@@ -416,7 +416,7 @@ try {
           window.__pipOpts = opts;
           const f = document.createElement("iframe");
           f.id = "fake-pip";
-          f.style.cssText = "position:fixed;right:0;top:0;width:200px;height:44px;border:0;z-index:2147483647";
+          f.style.cssText = "position:fixed;right:0;top:0;width:240px;height:40px;border:0;z-index:2147483647";
           document.body.appendChild(f);
           const w = f.contentWindow;
           w.close = () => {
@@ -434,13 +434,14 @@ try {
     await page.locator(".mini-btn").click();
     await page.waitForTimeout(300);
     const opts = await page.evaluate(() => window.__pipOpts);
-    check(`${name}: opens small`, opts && opts.width <= 220 && opts.height <= 60, JSON.stringify(opts));
+    check(`${name}: opens small`, opts && opts.width <= 260 && opts.height <= 60, JSON.stringify(opts));
     check(`${name}: idle`, (await pipText()) === "Idle");
     await page.locator(".go").click();
     await page.waitForTimeout(400);
     check(`${name}: waiting for race`, (await pipText()) === "Waiting for race", await pipText());
     await page.waitForTimeout(2500);
     check(`${name}: racing`, (await pipText()) === "Racing" && (await pipClass()) === "typing", await pipText());
+    check(`${name}: shows which account`, (await page.frameLocator("#fake-pip").locator(".m b").textContent()) === "racer_me");
     if (shotDir) await page.locator("#fake-pip").screenshot({ path: path.join(shotDir, "mini-racing.png") });
     await waitForResults(page, 1);
     await page.waitForTimeout(1500);
@@ -468,7 +469,7 @@ try {
           window.__pipOpts = opts;
           const f = document.createElement("iframe");
           f.id = "fake-pip";
-          f.style.cssText = "position:fixed;right:0;top:0;width:200px;height:44px;border:0;z-index:2147483647";
+          f.style.cssText = "position:fixed;right:0;top:0;width:240px;height:40px;border:0;z-index:2147483647";
           document.body.appendChild(f);
           const w = f.contentWindow;
           w.close = () => {
