@@ -946,7 +946,7 @@ try {
     await page.locator(".test-alarm").click();
     await page.waitForTimeout(300);
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: sends the urgent test alert`, notes.length === 1 && notes[0] === "⚠ CAPTCHA: session paused: TEST: this is what a captcha alert looks like.", JSON.stringify(notes));
+    check(`${name}: sends the urgent test alert`, notes.length === 1 && notes[0] === "⚠ CAPTCHA: session paused · racer_me: TEST: this is what a captcha alert looks like.", JSON.stringify(notes));
     check(`${name}: panel turns red`, (await page.locator(".box.alarm").count()) === 1);
     await page.waitForTimeout(6500);
     check(`${name}: stops by itself`, (await page.locator(".box.alarm").count()) === 0);
@@ -1249,7 +1249,7 @@ try {
     await page.locator('.try[data-try="loggedOut"]').click();
     await page.waitForTimeout(400);
     const notes = await page.evaluate(() => window.__notes);
-    check(`${name}: urgent test alert`, notes.length === 1 && notes[0] === "⚠ LOGGED OUT: TEST: this is what the logged-out alert looks like.", JSON.stringify(notes));
+    check(`${name}: urgent test alert`, notes.length === 1 && notes[0] === "⚠ LOGGED OUT · racer_me: TEST: this is what the logged-out alert looks like.", JSON.stringify(notes));
     check(`${name}: panel turns red`, (await page.locator(".box.alarm").count()) === 1);
     await page.waitForTimeout(6500);
     check(`${name}: stops by itself`, (await page.locator(".box.alarm").count()) === 0);
