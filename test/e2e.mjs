@@ -516,7 +516,7 @@ try {
   // The helper app itself (its server part; the window needs a screen).
   await test("desktop helper app", async (name) => {
     const { spawn } = await import("node:child_process");
-    const helper = spawn("python3", [path.join(root, "helper/nt-status.pyw"), "--headless"], { stdio: "ignore" });
+    const helper = spawn("python3", [path.join(root, "helper/nt-status.pyw"), "--headless"], { stdio: ["ignore", "pipe", "ignore"] });
     try {
       await new Promise((r) => setTimeout(r, 1200));
       const post = (body, origin = "https://www.nitrotype.com") =>
@@ -527,6 +527,17 @@ try {
       const rows = await (await fetch("http://127.0.0.1:47321/statuses")).json();
       check(`${name}: takes reports from Nitro Type pages`, ok.status === 200 && rows.length === 2 && rows[0].name === "account_one" && rows[0].status === "Racing" && rows[1].status === "Taking a break", JSON.stringify(rows));
       check(`${name}: refuses other sites`, evil.status === 403);
+      // Sounds: an alarm when an account needs you, a soft one when one finishes.
+      const out = [];
+      helper.stdout.on("data", (d) => out.push(String(d)));
+      await new Promise((r) => setTimeout(r, 1500)); // the helper has seen account_two on a break
+      await post({ id: "a1", name: "account_one", status: "Logged out", tone: "paused" });
+      await post({ id: "b2", name: "account_two", status: "Done", tone: "done" });
+      await new Promise((r) => setTimeout(r, 2500));
+      const log = out.join("");
+      check(`${name}: alarm when one needs you`, log.includes("sound: alert account_one"), log.slice(-300));
+      check(`${name}: soft sound when one finishes`, log.includes("sound: soft account_two"), log.slice(-300));
+      check(`${name}: alarm only once (repeats a minute later)`, log.split("sound: alert account_one").length === 2);
     } finally {
       helper.kill();
     }
@@ -537,6 +548,117 @@ try {
     await context.route("http://127.0.0.1:47321/**", (route) => route.abort("connectionrefused"));
     await page.waitForTimeout(2500);
     check(`${name}: says so`, (await page.locator(".helper-state").textContent()).startsWith("Helper: not found"), await page.locator(".helper-state").textContent());
+    await context.close();
+  });
+
+  // Two Chrome profiles (contexts) sharing one folder: one mini window shows both.
+  await test("one mini window for all accounts (shared folder)", async (name) => {
+    const disk = new Map(); // the folder on "this computer", shared by both profiles
+    const fakeFolder = `(() => {
+      const op = (...a) => window.__fsOp(...a);
+      const file = (n) => ({
+        kind: "file",
+        name: n,
+        async getFile() { const t = await op("read", n); return { text: async () => t }; },
+        async createWritable() { let buf = ""; return { write: async (d) => { buf += d; }, close: async () => op("write", n, buf) }; },
+      });
+      const dir = {
+        kind: "directory",
+        name: "NT status",
+        async queryPermission() { return "granted"; },
+        async requestPermission() { return "granted"; },
+        async getFileHandle(n) { return file(n); },
+        async removeEntry(n) { await op("delete", n); },
+        async *entries() { for (const n of await op("list")) yield [n, file(n)]; },
+      };
+      window.showDirectoryPicker = async () => dir;
+      window.__ntAutotyperStaleMs = 5000;
+      const fake = {
+        async requestWindow(opts) {
+          window.__pipOpts = opts;
+          const f = document.createElement("iframe");
+          f.id = "fake-pip";
+          f.style.cssText = "position:fixed;right:0;top:0;width:240px;height:" + opts.height + "px;border:0;z-index:2147483647";
+          document.body.appendChild(f);
+          const w = f.contentWindow;
+          w.close = () => { w.dispatchEvent(new Event("pagehide")); f.remove(); };
+          return w;
+        },
+      };
+      Object.defineProperty(window, "documentPictureInPicture", { value: fake, configurable: true });
+    })()`;
+    const fsOp = (_source, op, n, data) => {
+      if (op === "write") disk.set(n, data);
+      if (op === "delete") disk.delete(n);
+      if (op === "read") return disk.get(n) ?? "";
+      if (op === "list") return [...disk.keys()];
+      return null;
+    };
+    const a = await open("?user=account_one&countdown=800", { ...BASE, wpmMin: 120, wpmMax: 120, races: 1 }, { advanced: true, tab: "panel" }, fakeFolder);
+    await a.context.exposeBinding("__fsOp", fsOp);
+    const b = await open("?user=account_two&countdown=800", { ...BASE }, { advanced: true, tab: "panel" }, fakeFolder);
+    await b.context.exposeBinding("__fsOp", fsOp);
+    try {
+      await a.page.locator(".share-pick").click();
+      await b.page.locator(".share-pick").click();
+      await b.page.waitForTimeout(4500);
+      const state = await b.page.locator(".share-state").textContent();
+      check(`${name}: sharing, sees the other account`, state.startsWith('Sharing ✓ through the folder "NT status", with 1 other account'), state);
+      await b.page.locator(".mini-btn").click();
+      await b.page.waitForTimeout(600);
+      const rows = () => b.page.evaluate(() => [...document.getElementById("fake-pip").contentDocument.querySelectorAll(".m")].map((m) => `${m.children[1].textContent}: ${m.children[2].textContent} (${m.className})`));
+      check(`${name}: room for both`, (await b.page.evaluate(() => window.__pipOpts.height)) >= 60, JSON.stringify(await b.page.evaluate(() => window.__pipOpts)));
+      check(`${name}: both accounts in one window`, JSON.stringify(await rows()) === JSON.stringify(["account_two: Idle (m idle)", "account_one: Idle (m idle)"]), JSON.stringify(await rows()));
+      await a.page.locator(".go").click();
+      await b.page.waitForTimeout(5000);
+      check(`${name}: the other account's racing shows up`, (await rows())[1] === "account_one: Racing (m typing)", JSON.stringify(await rows()));
+      if (shotDir) await b.page.locator("#fake-pip").screenshot({ path: path.join(shotDir, "mini-shared.png") });
+      // Account one's browser closes: it stops updating.
+      await a.context.close();
+      await b.page.waitForTimeout(8000);
+      check(`${name}: a closed one says Not running`, (await rows())[1] === "account_one: Not running (m gone)", JSON.stringify(await rows()));
+      await b.page.locator(".share-stop").click();
+      await b.page.waitForTimeout(500);
+      check(`${name}: stop sharing`, (await rows()).length === 1 && (await b.page.locator(".share-state").textContent()) === "Not sharing.");
+    } finally {
+      await b.context.close();
+      await a.context.close().catch(() => {});
+    }
+  });
+
+  await test("sound blocked after a reload: the warning bar says so", async (name) => {
+    const { context, page } = await open("", { ...BASE, notify: true, levelRace: "low" }, { advanced: false }, () => {
+      window.Notification = class {
+        static permission = "granted";
+        static requestPermission = async () => "granted";
+        constructor() {}
+        close() {}
+      };
+      window.AudioContext = class {
+        constructor() {
+          this.state = "suspended";
+          this.currentTime = 0;
+          this.destination = {};
+        }
+        resume() {
+          if (window.__activated) this.state = "running";
+          return Promise.resolve();
+        }
+        createGain() {
+          return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: (x) => x };
+        }
+        createOscillator() {
+          return { frequency: {}, connect: (x) => x, start() {}, stop() {} };
+        }
+      };
+    });
+    await page.waitForTimeout(1500);
+    const text = await page.locator(".nw-text").textContent();
+    check(`${name}: shown right away, before any sound is needed`, (await page.locator(".note-warn").isVisible()) && text.startsWith("🔇 No sound right now"), text);
+    await page.evaluate(() => (window.__activated = true));
+    await page.mouse.click(700, 400);
+    await page.waitForTimeout(1200);
+    check(`${name}: a click on the page fixes it`, !(await page.locator(".note-warn").isVisible()));
     await context.close();
   });
 

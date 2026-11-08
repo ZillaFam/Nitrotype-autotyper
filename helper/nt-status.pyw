@@ -7,9 +7,13 @@ of seconds (turn on "Send status to the desktop helper" in its Panel tab).
 
 Everything stays on this computer: the helper only listens on 127.0.0.1.
 
+It also makes the sounds (no browser rules about clicking first here): an
+alarm when an account needs you (captcha, logged out, stuck), repeated every
+minute up to 5 times, and a soft sound when one finishes or stops running.
+
 Run it: double-click this file (Windows, with Python installed), or
     python3 nt-status.pyw
-Drag the box to move it; right-click it to quit.
+Drag the box to move it; right-click it for sound on/off, back to the corner, quit.
 Without a screen (tests): python3 nt-status.pyw --headless
 """
 
@@ -39,6 +43,7 @@ def snapshot():
                     "name": s["name"],
                     "status": "Not running" if gone else s["status"],
                     "tone": "gone" if gone else s["tone"],
+                    "muted": False if gone else s.get("muted", False),
                     "age": round(now - s["at"]),
                 }
             )
@@ -94,6 +99,7 @@ class Handler(BaseHTTPRequestHandler):
                 "name": str(data.get("name") or "Nitro Type")[:40],
                 "status": str(data.get("status") or "")[:40],
                 "tone": tone if tone in TONES else "idle",
+                "muted": bool(data.get("muted")),
                 "at": time.time(),
             }
         self._send(200, b'{"ok":true}')
@@ -116,6 +122,56 @@ BG = "#10152a"
 ALERT_BG = "#4a1520"
 
 
+# ---- sounds ---------------------------------------------------------------
+ALERT_REPEAT_S = 60
+ALERT_MAX = 5
+sound = {"on": True, "bell": None}  # bell: the window's beep, where there's no system sound
+said = {}  # account id -> {"tone", "alerts", "last"}
+
+
+def play(kind, name=""):
+    """kind: "alert" (needs you) or "soft" (done, stopped running)."""
+    if not sound["on"]:
+        return
+    if "--headless" in sys.argv:
+        print(f"sound: {kind} {name}", flush=True)
+        return
+    try:
+        if sys.platform.startswith("win"):
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_ICONHAND if kind == "alert" else winsound.MB_ICONASTERISK)
+        elif sys.platform == "darwin":
+            import subprocess
+
+            subprocess.Popen(["afplay", "/System/Library/Sounds/" + ("Sosumi.aiff" if kind == "alert" else "Glass.aiff")])
+        elif sound["bell"]:
+            sound["bell"]()
+    except Exception:
+        pass
+
+
+def sounds_for(rows):
+    """Called every second with the current rows: plays what changed."""
+    now = time.time()
+    for r in rows:
+        if r.get("id") is None:
+            continue
+        before = said.get(r["id"])
+        tone = r["tone"]
+        if tone == "paused":
+            if not before or before["tone"] != "paused":
+                said[r["id"]] = {"tone": tone, "alerts": 1, "last": now}
+                play("alert", r["name"])
+            elif before["alerts"] < ALERT_MAX and now - before["last"] >= ALERT_REPEAT_S:
+                before.update(alerts=before["alerts"] + 1, last=now)
+                play("alert", r["name"])
+            continue
+        if before and before["tone"] != tone and tone in ("done", "gone"):
+            play("soft", r["name"])
+        said[r["id"]] = {"tone": tone, "alerts": 0, "last": now}
+
+
 def start_server():
     try:
         server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
@@ -128,8 +184,10 @@ def start_server():
 def run_headless():
     print(f"NT Autotyper status helper on http://127.0.0.1:{PORT} (no window)", flush=True)
     while True:
-        time.sleep(2)
-        for r in snapshot():
+        time.sleep(1)
+        rows = snapshot()
+        sounds_for(rows)
+        for r in rows:
             print(f"{r['name']:<24} {r['status']}", flush=True)
 
 
@@ -157,8 +215,12 @@ def run_window():
         y = root.winfo_screenheight() - h - 56  # above the taskbar
         root.geometry(f"+{x}+{y}")
 
+    sound["bell"] = root.bell
+
     def refresh():
-        data = snapshot() or [{"name": "Waiting for Nitro Type…", "status": "", "tone": "idle"}]
+        data = snapshot()
+        sounds_for(data)
+        data = data or [{"name": "Waiting for Nitro Type…", "status": "", "tone": "idle"}]
         state["flash"] = not state["flash"]
         if len(rows) != len(data):
             for r in rows:
@@ -184,7 +246,8 @@ def run_window():
                 widget.configure(bg=bg)
             dot.itemconfigure("d", fill=TONES.get(r["tone"], TONES["idle"]))
             name.configure(text=r["name"], fg="#ffd0d5" if alert else ("#5a6283" if r["tone"] == "gone" else "#8e9cc9"))
-            status.configure(text=r["status"], fg="#7d86a6" if r["tone"] == "gone" else "#e8edff")
+            # 🔇: that profile's page can't make sound until it's clicked (this box still can)
+            status.configure(text=("🔇 " if r.get("muted") else "") + r["status"], fg="#7d86a6" if r["tone"] == "gone" else "#e8edff")
         # Grew or shrank (a new account, a longer status): back into the corner.
         root.update_idletasks()
         size = (root.winfo_reqwidth(), root.winfo_reqheight())
@@ -207,6 +270,8 @@ def run_window():
         root.geometry(f"+{e.x_root - dx}+{e.y_root - dy}")
 
     menu = tk.Menu(root, tearoff=0)
+    sound_on = tk.BooleanVar(value=True)
+    menu.add_checkbutton(label="Sound", variable=sound_on, command=lambda: sound.update(on=sound_on.get()))
     menu.add_command(label="Back to the corner", command=lambda: (state.update(moved=False), place()))
     menu.add_command(label="Quit", command=root.destroy)
 

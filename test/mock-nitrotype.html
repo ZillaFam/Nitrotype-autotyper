@@ -25,6 +25,7 @@
     captcha=1                                  a captcha appears mid-race, once (the race freezes); clicks on it are counted in window.__captchaClicks;
                                                window.__solveCaptcha() is you solving it (it goes away, the race goes on)
     status=none                                no "status" events (countdown / racing) from the race server
+    user=name                                  your username (default racer_me)
     logout=after1                              logged out 2 s after the first race: sent to /login (a login page), and
                                                /race sends you back there from then on (sessionStorage "mock-loggedout")
     strand=after1                              2 s after the first race, ends up on /garage (no race there), once
@@ -127,7 +128,7 @@
           { userID: 102, name: "Cruiser", wpm: 105 },
           { userID: 103, name: "Slowpoke", wpm: 55 },
         ];
-        const comp = { state: { racers: [], lessonContent: "" }, props: { user: { userID: ME, username: "racer_me", displayName: "Me Myself", loggedIn: params.get("loggedout") !== "1", level: 11, seasonLevel: 4 } } };
+        const comp = { state: { racers: [], lessonContent: "" }, props: { user: { userID: ME, username: params.get("user") || "racer_me", displayName: "Me Myself", loggedIn: params.get("loggedout") !== "1", level: 11, seasonLevel: 4 } } };
         window.__garageClicks = 0;
         // The always-on reCAPTCHA v3 badge: not a captcha to solve.
         document.write(`<iframe class="grecaptcha-badge" src="about:blank#https://www.google.com/recaptcha/api2/anchor?k=x&size=invisible" width="256" height="60" style="position:fixed;right:0;bottom:0;border:0"></iframe>`);

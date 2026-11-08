@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nitro Type Autotyper
 // @namespace    https://github.com/ZillaFam/Nitrotype-autotyper
-// @version      3.16.0
+// @version      3.17.0
 // @description  Types Nitro Type races for you: WPM and accuracy ranges, human-like rhythm and typos, nitros on the longest words, multi-race sessions with breaks, stats with Nitro Type's own results, and notifications.
 // @homepageURL  https://github.com/ZillaFam/Nitrotype-autotyper
 // @supportURL   https://github.com/ZillaFam/Nitrotype-autotyper/issues
@@ -40,7 +40,7 @@
   if (window.__NT_AUTOTYPER__) return;
   window.__NT_AUTOTYPER__ = true;
 
-  const VERSION = "3.16.0";
+  const VERSION = "3.17.0";
   const IS_TOP = window === window.top;
   // The trusted-key trick only covers listeners added after this script
   // runs. If the page had already loaded, Nitro Type's are in place.
@@ -2557,6 +2557,23 @@
         }
       });
     },
+    // After a reload Chrome blocks page sound until a click on the page. Find
+    // out without playing anything, so the panel can say so before it matters.
+    probe() {
+      try {
+        this.audio ??= new (window.AudioContext || window.webkitAudioContext)();
+      } catch {
+        return;
+      }
+      if (!this.audio.state || this.audio.state === "running") return;
+      const resumed = Promise.resolve(this.audio.resume?.()).catch(() => {});
+      Promise.race([resumed, new Promise((r) => timers.set(r, 800))]).then(() => {
+        if (this.audio.state && this.audio.state !== "running" && !this.blocked) {
+          this.blocked = true;
+          panel.render?.();
+        }
+      });
+    },
     // A soft two-note chime for milestones and session done.
     chime() {
       this.ready(() => this.chimeNow());
@@ -3393,6 +3410,12 @@
             <label class="check"><input type="checkbox" data-k="miniMap"><span>Mini map instead of the race track<small>A light five-lane map of every racer, in place of Nitro Type's track.</small></span></label>
             <label class="check"><input type="checkbox" data-k="lite"><span>Low-FPS mode<small>For slow computers: no animations, no live standings, and the panel updates once a second.</small></span></label>
             <button class="btn2 reset-panel">Reset position and size</button>
+            <div class="field">
+              <div class="lbl">All your accounts in one mini window</div>
+              <div class="hint">Chrome allows one mini window (⧉) at a time, across all profiles. To see every account in it: in each Chrome profile, press Pick folder and choose the same folder (for example a new folder "NT status" in Documents). Then open ⧉ in just one profile.</div>
+              <div class="btn-row" style="margin-top:6px"><button class="btn2 share-pick">Pick folder</button><button class="btn2 share-stop" hidden>Stop sharing</button></div>
+              <div class="hint share-state"></div>
+            </div>
             <label class="check"><input type="checkbox" data-k="helper"><span>Send status to the desktop helper<small>For several accounts (one per Chrome profile): the helper app shows them all in one small box in the corner of your screen. Turn this on in each profile, and run helper/nt-status.pyw from the project page. <b class="helper-state"></b></small></span></label>
             <hr class="sep">
             <label class="check"><input type="checkbox" data-k="notify"><span>Notifications<small class="notify-hint">Every time: a system pop-up, plus a pop-up on this page (seen even in full screen).</small></span></label>
@@ -3641,36 +3664,70 @@
       html, body { margin: 0; height: 100%; background: #10152a; }
       body { display: flex; align-items: center; justify-content: center; overflow: hidden; user-select: none;
         font: 600 15px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: #e8edff; }
-      .m { display: flex; align-items: center; gap: 9px; padding: 0 12px; white-space: nowrap; width: 100%; box-sizing: border-box; }
+      body { flex-direction: column; align-items: stretch; padding: 4px 0; box-sizing: border-box; }
+      .m { display: flex; align-items: center; gap: 9px; padding: 0 12px; white-space: nowrap; width: 100%; box-sizing: border-box; flex: 1; min-height: 0; }
       /* which account: several can run (one per Chrome profile), each with its own window */
       .m b { font-weight: 500; color: #8e9cc9; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
       .m span { margin-left: auto; flex: none; }
       body.paused .m b { color: #ffd0d5; }
       .m i { width: 10px; height: 10px; border-radius: 50%; background: #6b7aa8; flex: none; }
-      body.typing .m i { background: #3ddc84; box-shadow: 0 0 0 3px rgba(61, 220, 132, .25); }
-      body.waiting .m i { background: #f5c451; }
-      body.break .m i { background: #9cc3ff; }
-      body.done .m i { background: #3ddc84; }
+      .m.typing i { background: #3ddc84; box-shadow: 0 0 0 3px rgba(61, 220, 132, .25); }
+      .m.waiting i { background: #f5c451; }
+      .m.break i { background: #9cc3ff; }
+      .m.done i { background: #3ddc84; }
+      .m.gone i { background: #4a5170; }
+      .m.gone b, .m.gone span { color: #6b7394; }
+      .m.paused i { background: #ff5c6c; }
+      .m.paused b { color: #ffd0d5; }
       body.paused { background: #4a1520; animation: alert 1s steps(2, jump-none) infinite; }
-      body.paused .m i { background: #ff5c6c; }
       @keyframes alert { 50% { background: #10152a; } }
       @media (prefers-reduced-motion: reduce) { body.paused { animation: none; } }
     `;
     const mini = { win: null, unloading: false };
     listen(window, "pagehide", () => (mini.unloading = true));
+    // This account first, then the others sharing the folder.
+    function miniRows() {
+      const [cls, , text] = stateNow();
+      const rows = [{ name: session.player || "Nitro Type", status: text, tone: cls, muted: Boolean(alarm.blocked) }];
+      for (const r of share.dir && share.granted ? share.rows : []) {
+        const gone = Date.now() - r.at > staleMs();
+        rows.push({ name: String(r.name), status: gone ? "Not running" : String(r.status), tone: gone ? "gone" : String(r.tone), muted: !gone && r.muted });
+      }
+      return rows;
+    }
     function updateMini() {
       const win = mini.win;
       if (!win) return;
-      const [cls, , text] = stateNow();
       const doc = win.document;
+      const rows = miniRows();
+      const els = [...doc.querySelectorAll(".m")];
+      if (els.length !== rows.length) {
+        for (const el of els) el.remove();
+        for (const _ of rows) {
+          const row = doc.createElement("div");
+          row.className = "m";
+          row.append(doc.createElement("i"), doc.createElement("b"), doc.createElement("span"));
+          doc.body.appendChild(row);
+        }
+        // Room for every account (Chrome may refuse without a click: then they squeeze).
+        try {
+          win.resizeTo(win.outerWidth, win.outerHeight - win.innerHeight + rows.length * 30 + 8);
+        } catch {
+          /* fine */
+        }
+      }
+      [...doc.querySelectorAll(".m")].forEach((el, i) => {
+        const r = rows[i];
+        if (el.className !== `m ${r.tone}`) el.className = `m ${r.tone}`;
+        const status = r.muted ? `🔇 ${r.status}` : r.status;
+        if (el.children[1].textContent !== r.name) el.children[1].textContent = r.name;
+        if (el.children[2].textContent !== status) el.children[2].textContent = status;
+      });
+      // The whole window flashes red when any account needs you.
+      const cls = rows.some((r) => r.tone === "paused") ? "paused" : rows[0].tone;
       if (doc.body.className !== cls) doc.body.className = cls;
-      const span = doc.querySelector(".m span");
-      if (span && span.textContent !== text) span.textContent = text;
-      // The account's Nitro Type username, to tell several windows apart.
-      const name = session.player || "Nitro Type";
-      const label = doc.querySelector(".m b");
-      if (label && label.textContent !== name) label.textContent = name;
-      if (doc.title !== `${name}: ${text}`) doc.title = `${name}: ${text}`;
+      const title = rows.length === 1 ? `${rows[0].name}: ${rows[0].status}` : rows.map((r) => `${r.name}: ${r.status}`).join(" · ");
+      if (doc.title !== title) doc.title = title;
     }
     async function openMini() {
       if (mini.win) return;
@@ -3680,7 +3737,8 @@
       }
       let win;
       try {
-        win = await window.documentPictureInPicture.requestWindow({ width: 240, height: 40 });
+        // A row per account (this one, plus any sharing the folder).
+        win = await window.documentPictureInPicture.requestWindow({ width: 240, height: Math.max(40, miniRows().length * 30 + 8) });
       } catch (err) {
         panel.toast?.("high", "Couldn't open the mini window", String(err?.message ?? err));
         return;
@@ -3692,10 +3750,6 @@
       const style = doc.createElement("style");
       style.textContent = MINI_CSS;
       doc.head.appendChild(style);
-      const box = doc.createElement("div");
-      box.className = "m";
-      box.append(doc.createElement("i"), doc.createElement("b"), doc.createElement("span"));
-      doc.body.appendChild(box);
       win.addEventListener("pagehide", () => {
         mini.win = null;
         // Closed by you (not by this page reloading): stays closed.
@@ -3752,7 +3806,7 @@
         const res = await fetch(HELPER_URL, {
           method: "POST",
           headers: { "Content-Type": "text/plain" }, // a "simple" request: no preflight
-          body: JSON.stringify({ id: helperId, name: session.player || "Nitro Type", status, tone }),
+          body: JSON.stringify({ id: helperId, name: session.player || "Nitro Type", status, tone, muted: Boolean(alarm.blocked) }),
         });
         setHelperState(res.ok ? "Helper: connected ✓" : `Helper: answered ${res.status}`);
       } catch {
@@ -3770,6 +3824,136 @@
     }
     // Every 2 s, even in a background tab.
     timers.every(() => reportToHelper(), 2000);
+
+    // ---- several accounts in one mini window: a shared folder -----------------
+    // Chrome allows one mini window at a time (across all profiles), and the
+    // profiles can't see each other. But they can all use the same folder on
+    // this computer: each writes its status there, and the one mini window
+    // shows them all. The folder is picked once per profile (Chrome asks).
+    const staleMs = () => window.__ntAutotyperStaleMs ?? 20000;
+    const share = { dir: null, granted: false, rows: [], busy: false, error: "" };
+    // A folder can only be remembered in IndexedDB.
+    function kv(mode, fn) {
+      return new Promise((resolve, reject) => {
+        const open = indexedDB.open("nt-autotyper", 1);
+        open.onupgradeneeded = () => open.result.createObjectStore("kv");
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          try {
+            const tx = open.result.transaction("kv", mode);
+            const req = fn(tx.objectStore("kv"));
+            tx.oncomplete = () => resolve(req?.result);
+            tx.onerror = () => reject(tx.error);
+          } catch (err) {
+            reject(err);
+          }
+        };
+      });
+    }
+    const kvGet = (key) => kv("readonly", (st) => st.get(key)).catch(() => undefined);
+    const kvSet = (key, value) => kv("readwrite", (st) => st.put(value, key)).catch(() => {});
+    const kvDel = (key) => kv("readwrite", (st) => st.delete(key)).catch(() => {});
+
+    function showShareState() {
+      const state = !share.dir
+        ? "Not sharing."
+        : !share.granted
+          ? "Click anywhere on this page to keep sharing (Chrome asks after a restart; pick \"Allow on every visit\" so it stops asking)."
+          : share.error
+            ? `Sharing problem: ${share.error}`
+            : `Sharing ✓ through the folder "${share.dir.name}"${share.rows.length ? `, with ${share.rows.length} other account${share.rows.length === 1 ? "" : "s"}` : ""}.`;
+      setText($(".share-state"), state);
+      $(".share-stop").hidden = !share.dir;
+    }
+    async function shareCheck(ask) {
+      if (!share.dir) return;
+      try {
+        let perm = await share.dir.queryPermission({ mode: "readwrite" });
+        if (perm !== "granted" && ask) perm = await share.dir.requestPermission({ mode: "readwrite" });
+        share.granted = perm === "granted";
+      } catch {
+        share.granted = false;
+      }
+      showShareState();
+    }
+    const myFile = () => `nt-status-${helperId}.json`;
+    async function syncShare() {
+      if (!share.dir || !share.granted || share.busy) return;
+      share.busy = true;
+      try {
+        const [tone, , status] = stateNow();
+        const me = { id: helperId, name: session.player || "Nitro Type", status, tone, muted: Boolean(alarm.blocked), at: Date.now() };
+        const file = await share.dir.getFileHandle(myFile(), { create: true });
+        const out = await file.createWritable();
+        await out.write(JSON.stringify(me));
+        await out.close();
+        const rows = [];
+        for await (const [name, handle] of share.dir.entries()) {
+          if (handle.kind !== "file" || name === myFile() || !/^nt-status-[a-z0-9]+\.json$/.test(name)) continue;
+          try {
+            const row = JSON.parse(await (await handle.getFile()).text());
+            if (Date.now() - row.at < 6 * 3600000) rows.push(row); // forget accounts unused for hours
+          } catch {
+            /* being written right now: next time */
+          }
+        }
+        share.rows = rows.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+        share.error = "";
+      } catch (err) {
+        if (err?.name === "NotAllowedError" || err?.name === "SecurityError") share.granted = false;
+        else share.error = err?.message ?? String(err);
+      } finally {
+        share.busy = false;
+      }
+      showShareState();
+      updateMini();
+    }
+    timers.every(() => syncShare(), 2000);
+    $(".share-pick").addEventListener("click", async () => {
+      $(".share-pick").blur();
+      if (!window.showDirectoryPicker) {
+        panel.toast?.("high", "Can't share a folder here", "It needs Chrome or Edge, version 86 or newer.");
+        return;
+      }
+      try {
+        share.dir = await window.showDirectoryPicker({ id: "nt-autotyper-share", mode: "readwrite" });
+      } catch (err) {
+        if (err?.name !== "AbortError") panel.toast?.("high", "Couldn't use that folder", String(err?.message ?? err));
+        return;
+      }
+      share.granted = true;
+      kvSet("shareDir", share.dir);
+      showShareState();
+      syncShare();
+    });
+    $(".share-stop").addEventListener("click", async () => {
+      $(".share-stop").blur();
+      try {
+        if (share.granted) await share.dir.removeEntry(myFile());
+      } catch {
+        /* already gone */
+      }
+      share.dir = null;
+      share.granted = false;
+      share.rows = [];
+      kvDel("shareDir");
+      showShareState();
+      updateMini();
+    });
+    kvGet("shareDir").then((dir) => {
+      if (!dir || share.dir) return showShareState();
+      share.dir = dir;
+      shareCheck(false).then(() => syncShare());
+    });
+    // Chrome may want a click before using the folder again (after a restart).
+    listen(
+      window,
+      "pointerdown",
+      (e) => {
+        if (e.isTrusted && share.dir && !share.granted) shareCheck(true).then(() => syncShare());
+      },
+      true,
+    );
 
     // ---- pop-ups inside the page -----------------------------------------
     const toastBox = $(".toasts");
@@ -3906,8 +4090,19 @@
     // Chrome can switch a site's notifications off by itself (e.g. a site that
     // sends a lot of them), and then only the sound is left.
     const popupLevels = () => Object.values(NOTIFY).some((k) => ["normal", "high", "urgent"].includes(settings[k.level]));
+    // What's wrong with notifications right now (pop-ups and/or sound), if anything.
     function noteProblem() {
-      if (!settings.notify || !popupLevels() || !("Notification" in window)) return null;
+      if (!settings.notify) return null;
+      const popup = popupProblem();
+      const soundLevels = Object.values(NOTIFY).some((k) => ["low", "high", "urgent"].includes(settings[k.level]));
+      const sound = soundLevels && alarm.blocked
+        ? { key: "sound", text: "🔇 No sound right now: this page reloaded, and Chrome blocks sound until you click on it once. Click anywhere on this page.", fix: false }
+        : null;
+      if (popup && sound) return { key: `${popup.key}+sound`, text: `${popup.text} ${sound.text}`, fix: popup.fix };
+      return popup ?? sound;
+    }
+    function popupProblem() {
+      if (!popupLevels() || !("Notification" in window)) return null;
       const perm = Notification.permission;
       if (perm === "denied") {
         return {
@@ -4568,6 +4763,7 @@
     fillSettings();
     syncSubChecks();
     applyLayout();
+    if (settings.notify) alarm.probe(); // sound blocked since a reload? say so now
     panel.render();
     timers.every(() => ui.tab === "stats" && renderStats(), 15000); // refresh "x ago"
   }
