@@ -713,9 +713,8 @@ try {
           (window.__noteOpts ||= []).push({ title, ...opts });
         }
       };
-    });
-    await page.evaluate(() => {
-      // Count alarm beeps instead of making noise.
+      // Count alarm beeps instead of making noise (before the page loads: the
+      // script sets up its sound at load).
       window.__beeps = 0;
       window.AudioContext = class {
         constructor() {
@@ -730,8 +729,8 @@ try {
           return { frequency: {}, connect: (x) => x, start: () => window.__beeps++, stop() {} };
         }
       };
-      document.title = "Nitro Type";
     });
+    await page.evaluate(() => (document.title = "Nitro Type"));
     await page.waitForTimeout(1200);
     check(`${name}: the always-on reCAPTCHA badge isn't a captcha`, (await page.locator(".go").textContent()) === "Start" && !(await status(page)).includes("Captcha"));
     await page.locator(".go").click();
